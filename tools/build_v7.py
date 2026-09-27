@@ -378,6 +378,10 @@ rep(43, '''        if s_out > best_out["auc"] + 1e-5:''',
 # ---------------------------------------------------------------------------
 # 8.x kết quả
 # ---------------------------------------------------------------------------
+rep(51, '''bp = a2.boxplot(data, labels=list(cfg.models), patch_artist=True, widths=.5)''',
+        '''# [V7] matplotlib >= 3.9 đổi `labels` -> `tick_labels`; đặt nhãn trục riêng để chạy mọi phiên bản
+bp = a2.boxplot(data, patch_artist=True, widths=.5)
+a2.set_xticks(range(1, len(cfg.models) + 1)); a2.set_xticklabels(list(cfg.models))''')
 rep_re(52, r"\bsel_df\b", "agg_sel_df", min_count=4)
 rep(52, '''best_agg = agg_sel_df.groupby("aggregation").inner_auc.mean().idxmax()''',
         '''AGG_INNER_BEST = agg_sel_df.groupby("aggregation").inner_auc.mean().idxmax()
