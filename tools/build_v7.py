@@ -443,6 +443,32 @@ rep(73, '''        logit = self.model(x)
         with torch.backends.cudnn.flags(enabled=False):
             logit = self.model(x)
             logit.sum().backward()''')
+rep(73, '''        top = np.argsort(m_leak)[-3:][::-1]''',
+        '''        if (not np.isfinite(m_leak).all()) or float(m_leak.sum()) <= 1e-9:
+            # [V7] bản đồ toàn 0 (ReLU triệt tiêu hết) -> argmax vô nghĩa, KHÔNG đưa vào kết luận
+            print(f"\\n[{cam_name}] !! Bản đồ Grad-CAM SUY BIẾN (toàn 0) -> loại khỏi kết luận.")
+            del mdl; gc.collect()
+            continue
+        top = np.argsort(m_leak)[-3:][::-1]''')
+rep(73, '''    _peak = np.mean([v["peak_hz"] for v in CAM_MASS.values()])
+    _share = np.mean([v["share_below_800"] for v in CAM_MASS.values()])''',
+        '''    if not CAM_MASS:
+        print("!! Không mô hình nào cho bản đồ Grad-CAM hợp lệ -> không rút kết luận từ Grad-CAM.")
+    _peak = np.mean([v["peak_hz"] for v in CAM_MASS.values()]) if CAM_MASS else np.nan
+    _share = np.mean([v["share_below_800"] for v in CAM_MASS.values()]) if CAM_MASS else np.nan''')
+rep(74, '''        if _tiny:
+            _cap += (''',
+        '''        if base_auc < 0.6:
+            # [V7] mô hình gần/kém hơn ngẫu nhiên trên fold này -> ΔAUC khi che không diễn giải được
+            _cap += (f" The baseline AUC on this fold ({base_auc:.2f}) is below 0.6, so the occlusion "
+                     "profile is NOT interpretable and no band-importance claim is made.")
+        elif _tiny:
+            _cap += (''')
+rep(74, '''        r_sp = float(spstats.spearmanr(o0.auc_drop.values, info).statistic) if len(o0) > 4 else np.nan''',
+        '''        r_sp = (float(spstats.spearmanr(o0.auc_drop.values, info).statistic)
+                if (len(o0) > 4 and b0 >= 0.6) else np.nan)
+        if b0 < 0.6:
+            print(f"\\n[{n0}] AUC nền của fold {CAM_FOLD} = {b0:.3f} < 0.6 -> không so sánh occlusion với §3.5.")''')
 rep(79, '''# 10.4c t-SNE MỨC BẢN GHI - 116 điểm, đơn vị thống kê đúng''',
         '''# 10.4c t-SNE MỨC BẢN GHI - mỗi bản ghi một điểm, đơn vị thống kê đúng''')
 rep(81, '''    print("       (116 bản ghi, ICC cao), không bởi dung lượng mô hình -> thêm tham số hay đổi")''',
@@ -510,6 +536,36 @@ rep(84, '''{'KHÔNG ủng hộ' if not mil_ok else 'ủng hộ'} tiền đề h�
         '''{_mil_txt_vi} tiền đề học đa thể hiện; (ii) dải tần mang thông tin
 {_band_txt_vi};''')
 
+# [V7-B9] Đoạn Results của v6 trộn hai mô hình: AUC bản ghi của mô hình tốt nhất mức bản ghi
+#         trừ AUC frame của mô hình tốt nhất mức frame. Nay cùng MỘT mô hình.
+rep(84, '''d_rec = float(rb.auc) - float(b.AUC)''',
+        '''d_rec = float(rb.auc) - float(frame_df.set_index("model").AUC[rb.model])   # [V7-B9] cùng một mô hình''')
+rep(84, '''{rb.recall:.3f}, specificity {rb.specificity:.3f}). Aggregation changed frame-level AUC by
+{d_rec:+.3f}.''',
+        '''{rb.recall:.3f}, specificity {rb.specificity:.3f}). For {rb.model}, aggregation changed the AUC by
+{d_rec:+.3f} relative to its own frame-level value.''')
+rep(84, '''recording-grouped cross-validation with a nested inner-validation protocol that selects the
+stopping epoch, the decision threshold and the record-level aggregation rule without touching the
+reported folds.''',
+        '''recording-grouped cross-validation with a nested inner-validation protocol that selects the
+stopping epoch and the decision threshold without touching the reported folds; the record-level
+aggregation rule ({best_agg}) was {'fixed in advance' if cfg.agg_selection == 'fixed' else 'selected on the inner validation sets'}.''')
+rep(84, '''                 f"per-recording score is nearly constant (ICC = {icc_mean:.2f}) - it may be "
+                 "discriminating acquisition sites. ")''',
+        '''                 f"per-recording score is largely recording-specific (ICC = {icc_mean:.2f}) - it may be "
+                 "discriminating acquisition sites; nor ")''')
+rep(84, '''(iii) Confound screening: {conf_verdict};''',
+        '''(iii) Confound screening: {_conf_en};''')
+rep(84, '''(logistic regression / SVM / gradient boosting on band-energy and spectral features, same splits):''',
+        '''(logistic regression / SVM / gradient boosting on hand-crafted spectral features and on gain-invariant
+log-Mel statistics, same splits, paired comparison):''')
+rep(84, '''_cf_up = str(conf_verdict).upper()''',
+        '''_cf_up = str(conf_verdict).upper()
+_conf_en = {"CÓ DẤU HIỆU CONFOUND": "signs of site/level confounding were found",
+            "CHƯA LOẠI TRỪ ĐƯỢC CONFOUND": "site confounding could not be excluded (no site information)",
+            "Không thấy dấu hiệu confound rõ": "no clear sign of confounding in the indirect checks"
+            }.get(str(conf_verdict), str(conf_verdict))''')
+
 # ---------------------------------------------------------------------------
 # 13 / 15: đổi tên sel_df -> dep_sel_df (v6 ghi đè sel_df của mục 8.5)
 # ---------------------------------------------------------------------------
@@ -559,6 +615,10 @@ for i, c in enumerate(nb["cells"]):
             bad.append((i, ln.strip()[:120]))
 assert not bad, "Còn số liệu cũ bị viết cứng:\n" + "\n".join(map(str, bad))
 
+# id ổn định cho mọi cell (nbformat >= 4.5)
+nb["nbformat"], nb["nbformat_minor"] = 4, 5
+for i, c in enumerate(nb["cells"]):
+    c["id"] = f"v7-{i:03d}"
 nb.setdefault("metadata", {})["leak_cnn_version"] = "v7"
 DST.write_text(json.dumps(nb, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
 print(f"OK -> {DST} ({len(nb['cells'])} cell)")

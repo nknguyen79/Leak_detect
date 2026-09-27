@@ -36,7 +36,7 @@ Notebook này là **pipeline nghiên cứu hoàn chỉnh, chạy được trên 
 | **B1** | Grad-CAM của CRNN làm v6 **dừng giữa chừng** (cuDNN RNN backward ở chế độ eval) → mục 10–16 không chạy. Đã sửa. |
 | **B2** | "Không chọn checkpoint trong warm-up" giờ **được thực thi** (v6 chỉ khai báo; LeakCNN1D bị chọn ở epoch ~0). |
 | **B3** | Không còn tự hạ `low_band_hz` về 1000 Hz dựa trên một dải "mạnh nhất" không có ý nghĩa sau hiệu chỉnh đa so sánh. |
-| **B5–B7** | `DEPLOY_MODEL` dùng trước khi định nghĩa; ghi đè `sel_df`; lọc sai tên baseline RMS. |
+| **B5–B11** | `DEPLOY_MODEL` dùng trước khi định nghĩa; ghi đè `sel_df`; lọc sai baseline RMS; đoạn Results trộn số liệu hai mô hình; kết luận từ Grad-CAM/occlusion suy biến; tương thích matplotlib mới. |
 | **S1** | CV lặp nhiều phân hoạch (mặc định 3 seed). |
 | **S2** | Quy tắc gộp mức bản ghi **đăng ký trước** (`p_mean`, xác suất thô); Platt và lựa chọn trên validation-trong chỉ là phân tích độ nhạy. |
 | **S3** | Baseline mạnh hơn (thống kê log-Mel) + so sánh **ghép cặp** thay cho "CI có chồng lấn không". |
@@ -1296,9 +1296,14 @@ if cfg.run_signal_ablation and cfg.ablation_variants:
         print("=> Cấu hình gốc vẫn là lựa chọn tốt nhất theo tiêu chí không thiên lệch.")
     else:
         _r = abl_sig.set_index("variant").loc[ABL_SELECTED]
-        print(f"=> Đề xuất: dùng '{ABL_SELECTED}' (ΔAUC ngoài {_r.dAUC_vs_base:+.4f}, CI ghép cặp "
-              f"[{_r.dAUC_lo:+.4f}, {_r.dAUC_hi:+.4f}]). Đổi cfg tương ứng rồi chạy lại TOÀN BỘ notebook;")
-        print("   con số báo cáo của lần chạy đó vẫn trung thực vì lựa chọn chỉ dựa trên validation-trong.")
+        if _r.dAUC_lo > 0:
+            print(f"=> Đề xuất: dùng '{ABL_SELECTED}' (ΔAUC ngoài {_r.dAUC_vs_base:+.4f}, CI ghép cặp "
+                  f"[{_r.dAUC_lo:+.4f}, {_r.dAUC_hi:+.4f}] > 0). Đổi cfg tương ứng rồi chạy lại TOÀN BỘ notebook;")
+            print("   con số báo cáo của lần chạy đó vẫn trung thực vì lựa chọn chỉ dựa trên validation-trong.")
+        else:
+            print(f"=> Validation-trong nghiêng về '{ABL_SELECTED}', nhưng ΔAUC ngoài {_r.dAUC_vs_base:+.4f} có CI "
+                  f"ghép cặp [{_r.dAUC_lo:+.4f}, {_r.dAUC_hi:+.4f}] CHỨA 0: chênh lệch CHƯA phân giải được.")
+            print("   Lựa chọn thận trọng: GIỮ cấu hình gốc; chỉ chuyển khi có thêm bản ghi/lần lặp ủng hộ.")
     _sig = abl_sig[(abl_sig.variant != "base") & ((abl_sig.dAUC_lo > 0) | (abl_sig.dAUC_hi < 0))]
     if len(_sig):
         print("Biến thể có ΔAUC ghép cặp KHÁC 0 (CI không chứa 0): " +
@@ -1349,6 +1354,17 @@ changes = pd.DataFrame([
      "ResNet18 nhận ảnh 64x63 -> bản đồ 2x2; LeakCNN1D nhận biên độ tuyệt đối (dùng được 'độ to')",
      "phóng log-Mel lên >=128 (bản đồ 4x4); LeakCNN1D chuẩn hoá theo mẫu như mô hình phổ",
      "so sánh kiến trúc công bằng, bớt kênh confound mức năng lượng"),
+    ("B9", "Đoạn Results tự sinh",
+     "'Aggregation changed AUC by ...' lấy AUC bản ghi của mô hình A trừ AUC frame của mô hình B; "
+     "câu tiếng Anh chèn chuỗi tiếng Việt; câu 'NOT allow us to claim' gãy ngữ pháp",
+     "cùng MỘT mô hình; ánh xạ kết luận sang tiếng Anh; nêu rõ quy tắc gộp đăng ký trước",
+     "đoạn văn đi thẳng vào bản thảo"),
+    ("B10", "Diễn giải trong trường hợp suy biến",
+     "Grad-CAM toàn 0 vẫn cho 'đỉnh 20 Hz'; occlusion kết luận 'đặc trưng phân tán' cả khi AUC nền < 0.5",
+     "loại bản đồ suy biến khỏi kết luận; occlusion chỉ diễn giải khi AUC nền >= 0.6",
+     "không rút kết luận từ mô hình chưa học được gì"),
+    ("B11", "Tương thích thư viện", "boxplot(labels=...) lỗi trên matplotlib >= 3.9",
+     "đặt nhãn trục riêng", "chạy được trên mọi phiên bản"),
     ("S1", "Một phân hoạch, một seed",
      "mọi chênh lệch kiến trúc lẫn với nhiễu phân hoạch",
      "CV lặp (mặc định 3 phân hoạch); Bảng 5b: mean±sd và AUC của OOF trung bình qua lần lặp",
