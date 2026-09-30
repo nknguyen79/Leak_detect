@@ -1,16 +1,38 @@
-# Leak_detect — nhận dạng rò rỉ ống PVC áp lực thấp bằng âm thanh + học sâu
+# Leak_detect — nhận dạng rò rỉ ống PVC áp lực thấp bằng âm thanh
 
-Pipeline nghiên cứu chạy trên Kaggle (GPU T4 x2), phục vụ bài báo *"Acoustic Leak Identification in
-Low-Pressure PVC Water Distribution Pipes Using Deep Convolutional Neural Networks"*.
+Hai pipeline nghiên cứu chạy trên Kaggle cho cùng tập dữ liệu (gậy nghe + micro, ống nhánh PVC Φ27, 0,5–2 bar,
+hai thư mục `leak/` và `noleak/`):
 
 | Tệp | Vai trò |
 |---|---|
-| `notebooks/leak-cnn-pvc-kaggle-v7.ipynb` | **Phiên bản hiện hành.** Chạy trên Kaggle: `Add Data` → đặt `cfg.data_root` → `Run All`. |
+| `notebooks/leak-ml-handcrafted-kaggle-v1.ipynb` | **Đặc trưng thủ công + học máy** (SVM, RF, XGBoost, k-NN): xử lý tín hiệu 7 điều kiện, ~168 đặc trưng, dải tần (RQ1), xử lý vs thô (RQ2), tập đặc trưng tối thiểu (RQ3), độ bền/thời gian nghe (RQ4). Chỉ cần CPU. |
+| `docs/phan-tich-quy-trinh-ML-dac-trung-thu-cong.md` | **Bài phân tích phương pháp**: vật lý bài toán, từng bước quy trình, thiết kế thí nghiệm, thống kê, ánh xạ hình/bảng vào bài báo, tài liệu tham khảo. |
+| `tools/ml_nb/*.py`, `tools/build_ml.py` | Nguồn của notebook ML (định dạng "percent"); `build_ml.py` dựng lại `.ipynb`. |
+| `notebooks/leak-cnn-pvc-kaggle-v7.ipynb` | Pipeline **học sâu** (5 kiến trúc CNN) — phiên bản hiện hành. |
 | `notebooks/leak-cnn-pvc-kaggle-v6.ipynb` | Bản v6 gốc (kèm output của lần chạy trên 80 bản ghi) — nguồn để dựng v7. |
 | `tools/build_v7.py`, `tools/v7_cells.py` | Dựng v7 **tái lập được** từ v6: mỗi chỉnh sửa là một phép thay thế có kiểm tra. |
-| `tools/run_smoke.py` | Chạy end-to-end ở chế độ smoke (3 epoch, 2 fold, dữ liệu mô phỏng) để kiểm tra toàn tuyến. |
+| `tools/run_smoke.py` | Chạy một notebook end-to-end ở chế độ smoke trên dữ liệu mô phỏng để kiểm tra toàn tuyến. |
 
-## Chạy
+## Notebook đặc trưng thủ công + ML
+
+**Kaggle:** `File → Import Notebook` → `notebooks/leak-ml-handcrafted-kaggle-v1.ipynb`; `Add Data` → dataset có
+`leak/` và `noleak/`; sửa `cfg.data_root` ở mục 1.2 (sai thì tự dò trong `/kaggle/input`); `Accelerator = None`;
+`Run All`. Cấu hình mặc định (7 điều kiện tín hiệu, CV 3×5 fold, CV lồng, tập kiểm tra khoá 20 %) mất khoảng
+40–80 phút trên CPU Kaggle. Kết quả nằm trong `/kaggle/working/leak_ml/` và `leak_ml_outputs.zip`.
+
+**Kiểm tra nhanh ngoài Kaggle (CPU):**
+
+```bash
+pip install numpy scipy pandas scikit-learn librosa soundfile PyWavelets xgboost shap matplotlib nbclient ipykernel
+python tools/build_ml.py                     # sau khi sửa tools/ml_nb/*.py
+LEAK_OUT=/tmp/leak_ml_smoke python tools/run_smoke.py notebooks/leak-ml-handcrafted-kaggle-v1.ipynb
+```
+
+`LEAK_SYNTH_N=<số bản ghi mỗi lớp>` đổi cỡ dữ liệu mô phỏng; `LEAK_SMOKE=0` chạy cấu hình đầy đủ.
+
+## Notebook CNN (v7)
+
+### Chạy
 
 **Kaggle:** bật GPU T4 x2 và Internet, gắn dataset có hai thư mục `leak/` và `noleak/`, sửa
 `cfg.data_root` ở mục 1.2, rồi `Run All`. Cấu hình mặc định (5 mô hình × 5 fold × 3 lần lặp CV
@@ -32,7 +54,7 @@ mô phỏng), `LEAK_OUT=<thư mục đầu ra>`.
 python tools/build_v7.py notebooks/leak-cnn-pvc-kaggle-v6.ipynb notebooks/leak-cnn-pvc-kaggle-v7.ipynb
 ```
 
-## Thay đổi chính v6 → v7
+### Thay đổi chính v6 → v7
 
 | Mã | Nội dung |
 |---|---|
