@@ -320,12 +320,18 @@ def bh_fdr(p):
     return out
 
 
+def fast_auc(y, s):
+    """AUC = U/(n1*n0) từ hạng trung bình (giống roc_auc_score, nhanh hơn nhiều cho bootstrap)."""
+    r = sst.rankdata(s); pos = y == 1; n1 = pos.sum(); n0 = len(y) - n1
+    return (r[pos].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+
+
 def auc_safe(y, s):
     y = np.asarray(y); s = np.asarray(s, float)
     m = np.isfinite(s)
     if m.sum() < 2 or len(np.unique(y[m])) < 2:
         return np.nan
-    return float(roc_auc_score(y[m], s[m]))
+    return float(fast_auc(y[m].astype(int), s[m]))
 
 
 def cliffs_delta(a, b):
@@ -356,7 +362,7 @@ def boot_auc_ci(y, s, n_boot=None, seed=0, groups=None, alpha=None):
             return np.nan, np.nan
         for _ in range(n_boot):
             i = np.concatenate([rng.choice(pos, len(pos)), rng.choice(neg, len(neg))])
-            vals.append(roc_auc_score(y[i], s[i]))
+            vals.append(fast_auc(y[i], s[i]))
     else:
         groups = np.asarray(groups)
         gids, inv = np.unique(groups, return_inverse=True)
@@ -368,7 +374,7 @@ def boot_auc_ci(y, s, n_boot=None, seed=0, groups=None, alpha=None):
         for _ in range(n_boot):
             pick = np.concatenate([rng.choice(gp, len(gp)), rng.choice(gn, len(gn))])
             i = np.concatenate([members[k] for k in pick])
-            vals.append(roc_auc_score(y[i], s[i]))
+            vals.append(fast_auc(y[i], s[i]))
     lo, hi = np.percentile(vals, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(lo), float(hi)
 
@@ -382,7 +388,7 @@ def paired_boot_delta(y, s1, s2, n_boot=None, seed=0):
     d = []
     for _ in range(n_boot):
         i = np.concatenate([rng.choice(pos, len(pos)), rng.choice(neg, len(neg))])
-        d.append(roc_auc_score(y[i], s1[i]) - roc_auc_score(y[i], s2[i]))
+        d.append(fast_auc(y[i], s1[i]) - fast_auc(y[i], s2[i]))
     d = np.asarray(d)
     lo, hi = np.percentile(d, [100 * cfg.alpha / 2, 100 * (1 - cfg.alpha / 2)])
     p = 2 * min((d <= 0).mean(), (d >= 0).mean())
