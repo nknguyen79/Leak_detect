@@ -147,10 +147,12 @@ for m in cfg.models:
 a.plot(CURVE.index, CURVE["mean"], "-", color=INK, lw=2.0, label="mean of 4 models")
 a.axhline(best_auc - cfg.k_tol, color=INK2, lw=0.8)
 a.axvline(K_MIN, color=INK2, lw=0.8); a.axvline(K_MAIN, color=CAT[1], lw=0.8)
-a.text(K_MIN, a.get_ylim()[0], f" K_MIN={K_MIN}", va="bottom", fontsize=8, color=INK2)
-a.text(K_MAIN, a.get_ylim()[0] + 0.02, f" K_MAIN={K_MAIN}", va="bottom", fontsize=8, color=INK2)
+_yt = a.get_ylim()[1]
+a.text(K_MIN, _yt, f" K_MIN={K_MIN}", va="top", ha="right" if K_MIN >= K_MAIN else "left", fontsize=8, color=INK2)
+a.text(K_MAIN, _yt, f" K_MAIN={K_MAIN}", va="top", ha="left", fontsize=8, color=INK2)
 a.set_xscale("log"); a.set_xlabel("number of selected features k (in-fold consensus ranking)")
-a.set_ylabel("record-level AUC (DEV CV)"); a.set_title("(a) Performance vs number of features"); a.legend(fontsize=7)
+a.set_ylabel("record-level AUC (DEV CV)"); a.set_title("(a) Performance vs number of features", pad=14)
+a.legend(fontsize=7, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.16))
 b = fig.add_subplot(gs[1])
 _sfr = SEL.iloc[::-1]
 b.barh(range(len(_sfr)), _sfr.sel_freq_topKmain, color=[GROUP_COLOR[g] for g in _sfr.group], height=0.7)
