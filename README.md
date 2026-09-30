@@ -18,7 +18,7 @@ hai thư mục `leak/` và `noleak/`):
 **Kaggle:** `File → Import Notebook` → `notebooks/leak-ml-handcrafted-kaggle-v1.ipynb`; `Add Data` → dataset có
 `leak/` và `noleak/`; sửa `cfg.data_root` ở mục 1.2 (sai thì tự dò trong `/kaggle/input`); `Accelerator = None`;
 `Run All`. Cấu hình mặc định (7 điều kiện tín hiệu, CV 3×5 fold, CV lồng, tập kiểm tra khoá 20 %) mất khoảng
-40–80 phút trên CPU Kaggle. Kết quả nằm trong `/kaggle/working/leak_ml/` và `leak_ml_outputs.zip`.
+20–40 phút trên CPU Kaggle. Kết quả nằm trong `/kaggle/working/leak_ml/` và `leak_ml_outputs.zip`.
 
 **Kiểm tra nhanh ngoài Kaggle (CPU):**
 

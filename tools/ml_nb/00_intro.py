@@ -35,7 +35,7 @@
 # 1. `Add Data` → gắn dataset có hai thư mục `leak/` và `noleak/`; sửa `cfg.data_root` ở mục 1.2 (để sai thì
 #    notebook tự dò trong `/kaggle/input`; không thấy dữ liệu → **chế độ mô phỏng**, số liệu không có giá trị).
 # 2. Không cần GPU. `Settings → Accelerator = None` (CPU 4 lõi) là đủ; bật Internet nếu thiếu `xgboost`/`PyWavelets`.
-# 3. `Run All`. Cấu hình mặc định (7 điều kiện, 3×5-fold, CV lồng) mất khoảng **40–80 phút** trên CPU Kaggle.
+# 3. `Run All`. Cấu hình mặc định (7 điều kiện, 3×5-fold, CV lồng) mất khoảng **20–40 phút** trên CPU Kaggle (4 lõi).
 #    Đặc trưng được cache trong `leak_ml/cache/` nên chạy lại chỉ mất phần học máy.
 # 4. Kết quả: `/kaggle/working/leak_ml/` (hình 300 dpi PNG+PDF, bảng CSV+LaTeX, `RESULTS_summary.md`,
 #    `key_results.json`, mô hình `.joblib`) và bản nén `leak_ml_outputs.zip`.

@@ -450,7 +450,8 @@ Không dùng kiểm định Wilcoxon trên 5 fold (p nhỏ nhất đạt đượ
 2. `Add Data` → gắn dataset có `leak/` và `noleak/`. Sửa `cfg.data_root` ở mục 1.2 (mặc định trỏ tới dataset
    `tapdulieutt-8k-v7-2/field_rec_8k_V7.2` đã dùng cho v7; nếu sai, notebook tự dò trong `/kaggle/input`).
 3. `Accelerator = None` (CPU là đủ); bật Internet nếu môi trường thiếu `xgboost`/`PyWavelets`.
-4. `Run All`. Đặc trưng được cache (`leak_ml/cache/`), chạy lại chỉ mất phần học máy.
+4. `Run All` — khoảng 20–40 phút trên CPU Kaggle (thử nghiệm trên 80 bản ghi mô phỏng ≈ 87 phút âm thanh, 4 lõi: 16 phút,
+   trong đó trích đặc trưng 7 điều kiện ≈ 3 phút). Đặc trưng được cache (`leak_ml/cache/`), chạy lại chỉ mất phần học máy.
 5. Tải `leak_ml_outputs.zip` (hình 300 dpi PNG + PDF, bảng CSV + LaTeX, mô hình `.joblib`, `RESULTS_summary.md`).
 
 | Muốn… | Sửa |
