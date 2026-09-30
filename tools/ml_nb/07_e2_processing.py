@@ -112,7 +112,7 @@ ax.axvline(0, color=INK2, lw=0.8)
 ax.set_yticks(range(len(conds))); ax.set_yticklabels(conds); ax.invert_yaxis()
 ax.set_xlabel("ΔAUC vs C0_RAW (record level, 95% paired bootstrap CI)")
 ax.set_title(f"Effect of each processing condition relative to raw audio ({cfg.e2_primary})")
-ax.legend(ncol=len(cfg.models), loc="lower right")
+ax.legend(ncol=len(cfg.models), loc="upper center", bbox_to_anchor=(0.5, -0.2))
 fig.tight_layout()
 savefig(fig, "Fig08_E2_delta_vs_raw", "Paired ΔAUC of each processing condition relative to raw audio.")
 
