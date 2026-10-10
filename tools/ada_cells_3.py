@@ -357,11 +357,12 @@ for ti, T in enumerate(TASKS):
             continue
         H = pd.concat([r["hist"].assign(job=r["key"]) for r in rs])
         agg = H.groupby("epoch").agg(a=("tgt_auc_rec", "mean"), sa=("tgt_auc_rec", "std"),
-                                     pad=("pad", "mean"), spad=("pad", "std"), sv=("src_val_rec_auc", "mean"))
+                                     pad_m=("pad", "mean"), sv=("src_val_rec_auc", "mean"))
+        # [lưu ý] không đặt tên cột "pad": ở pandas 2.x `agg.pad` là phương thức DataFrame.pad, không phải cột
         c = METHOD_COLOR.get(m, "k")
         axes[ti, 0].plot(agg.index, agg.a, color=c, label=mlabel(m))
         axes[ti, 0].fill_between(agg.index, agg.a - agg.sa.fillna(0), agg.a + agg.sa.fillna(0), color=c, alpha=.12)
-        axes[ti, 1].plot(agg.index, agg.pad, color=c, label=mlabel(m))
+        axes[ti, 1].plot(agg.index, agg["pad_m"], color=c, label=mlabel(m))
         axes[ti, 2].plot(agg.index, agg.sv, color=c, label=mlabel(m))
     for a in axes[ti]:
         a.axvline(SELECT_FROM_EPOCH, color="k", ls=":", lw=.8); a.set_xlabel("epoch")

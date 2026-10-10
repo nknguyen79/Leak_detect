@@ -352,7 +352,7 @@ Acquisition Domains: A Leakage-Free, Recording-Level Evaluation*.
 
 | Đã kiểm tra | Kết quả |
 |---|---|
-| Chạy end-to-end chế độ smoke (CPU, dữ liệu mô phỏng hai miền `lab`/`field`, `LEAK_SMOKE=1`) | 42/42 cell code chạy hết (~5.5 phút), sinh 23 hình + 19 bảng + văn bản nháp |
+| Chạy end-to-end chế độ smoke (CPU, dữ liệu mô phỏng hai miền `lab`/`field`, `LEAK_SMOKE=1`) | 42/42 cell code chạy hết (~5.5 phút), sinh 23 hình + 19 bảng + văn bản nháp; chạy được với **cả pandas 2.2.3 (như Kaggle) và pandas 3.0** |
 | Chạy kiểm tra dài hơn (400 vòng lặp/job, 48 bản ghi mô phỏng) cho source-only, DANN, CDAN+E, CORAL, oracle | Mất mát phân lớp hội tụ; bộ phân biệt miền của DANN/CDAN+E dao động quanh mức ngẫu nhiên (L_d ≈ ln 2, độ chính xác 0.35–0.55) → GRL hoạt động; AUC frame đích của source-only giảm dần (0.98 → 0.69) trong khi DANN (0.93), CORAL (0.97) giữ được |
 | Nhận diện miền trên 7 cấu hình mô phỏng | `folder`, `label_folder`, `filename`, `bandwidth`, `domain_roots`, `csv`, `regex` đều nhận đúng 2 miền; tập một miền dừng với chẩn đoán + `domain_map_template.csv` |
 | Kiểm thử đơn vị trong notebook | GRL đảo dấu gradient đúng hệ số; CORAL/MMD = 0 với hai phân bố trùng nhau; kích thước ánh xạ CDAN; trọng số entropy chuẩn hoá đúng |
