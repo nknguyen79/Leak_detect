@@ -11,6 +11,7 @@ Low-Pressure PVC Water Distribution Pipes Using Deep Convolutional Neural Networ
 | `tools/run_smoke.py` | Chạy end-to-end ở chế độ smoke (3 epoch, 2 fold, dữ liệu mô phỏng) để kiểm tra toàn tuyến. |
 | `notebooks/leak-ada-dann-kaggle-v1.ipynb` | **Thích ứng miền đối nghịch** (DANN, CDAN+E + AdaBN, Deep CORAL, oracle) cho tập đa miền `tapdulieuMix_16k`. |
 | `tools/build_ada.py`, `tools/ada_cells_{1,2,3}.py` | Dựng notebook ADA từ nội dung cell (biên dịch thử mọi cell trước khi ghi). |
+| `docs/DANH_GIA_KET_QUA_ADA_v1.md` | Phản biện kết quả chạy ADA v1 trên Kaggle (tính hợp lệ, cơ chế, thống kê) và lộ trình nâng cấp v2 cho bài báo Q1/Q2. |
 | `docs/KE_HOACH_ADA.md` | Kế hoạch chi tiết: phân tích dữ liệu, thiết kế phương pháp, giao thức đánh giá, tham số, danh mục hình/bảng cho bài báo, ngân sách tính toán, lộ trình. |
 
 ## Chạy
