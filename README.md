@@ -61,9 +61,18 @@ Xem kế hoạch đầy đủ ở [`docs/KE_HOACH_ADA.md`](docs/KE_HOACH_ADA.md)
 
 **Kaggle:** gắn dataset `tapdulieuMix_16k` (`leak/`, `noleak/` chứa `Rxxx_*` = hiện trường, `Sxx_*` = mô hình thí
 nghiệm), bật GPU T4 x2, chạy tới mục 2.4 để xác nhận hai miền `R_field` / `S_lab` và số bản ghi, rồi
-`Save Version → Save & Run All` (cấu hình mặc định v2 ≈ 4.5–5 giờ trên 2 × T4; giảm `cfg.seeds` hoặc
-`cfg.ablation_variants` nếu cần). Kết quả gom trong `/kaggle/working/ada_paper_artifacts.zip` (bảng CSV/LaTeX/Markdown,
-hình PNG+PDF, văn bản nháp Methods/Results).
+`Save Version → Save & Run All (Commit)`. Kết quả gom trong `/kaggle/working/ada_paper_artifacts.zip` (bảng
+CSV/LaTeX/Markdown, hình PNG+PDF, văn bản nháp Methods/Results).
+
+- **Thời gian:** cấu hình mặc định có ≈ 324 job huấn luyện (246 chính + 63 ablation + 15 quét λ), ≈ 1.5–2 phút/job
+  trên mỗi GPU → **≈ 5–6 giờ** trên 2 × T4. Dòng ETA đầu mục 8 thấp hơn thực tế vì tính từ các job source-only
+  (nhanh nhất).
+- **Không chạy lượt dài ở phiên tương tác:** khi trình duyệt mất kết nối, ô ngừng hiện output dù kernel vẫn chạy.
+  Bản commit chạy phía máy chủ; tiến độ xem ở tab *Logs* của phiên bản và trong `run_log.txt` (nhịp tim `⏱` mỗi
+  `cfg.heartbeat_min` phút, stack trace nếu một GPU không tiến triển quá `cfg.stall_min` phút).
+- **Chạy theo giai đoạn:** giai đoạn 1 đặt `cfg.seeds = (42,)` (≈ 2 giờ, ra đủ bảng/hình cho một seed); giai đoạn
+  2 thêm output của phiên bản 1 làm *Input* và đặt lại `cfg.seeds = (42, 43, 44)` — notebook tự tìm
+  `ada_results.pkl` trong `/kaggle/input` (`cfg.resume_dirs`) và chỉ chạy các job còn thiếu.
 
 **Kiểm tra nhanh ngoài Kaggle (CPU, dữ liệu mô phỏng hai miền):**
 

@@ -665,7 +665,8 @@ code(r'''
 # =========================================================
 # 13.1 Quét λ_max cho DANN / lambda sweep
 # =========================================================
-SW_T, SW_S = cfg.sweep_task, tuple(cfg.sweep_seeds)
+# [V2.1] so sánh GHÉP CẶP với lượt chính -> chỉ dùng seed có trong cfg.seeds (an toàn khi chạy theo giai đoạn)
+SW_T, SW_S = cfg.sweep_task, tuple(s_ for s_ in cfg.sweep_seeds if s_ in cfg.seeds) or (cfg.seeds[0],)
 LAMBDAS = sorted(set((cfg.lambda_max,) + tuple(cfg.lambda_grid)))
 if cfg.run_lambda_sweep and "dann" in cfg.methods:
     jobs = []
@@ -715,7 +716,7 @@ ABLATIONS = {
     "so_no_chain_aug": ("source_only", {"chain_p": 0.0}, "source_only"),
     "no_fir": ("dann", {"fir_p": 0.0}, "dann"), "no_aug": ("dann", {"augment": False}, "dann"),
     "no_balance": ("dann", {"balanced": False}, "dann"), "cdan_noent": ("cdan", {}, "cdan_e")}
-AB_S = tuple(cfg.ablation_seeds)
+AB_S = tuple(s_ for s_ in cfg.ablation_seeds if s_ in cfg.seeds) or (cfg.seeds[0],)   # [V2.1] như SW_S
 if cfg.run_ablation:
     todo = {k: v for k, v in ABLATIONS.items() if k in cfg.ablation_variants and v[2] in cfg.methods}
     jobs = []

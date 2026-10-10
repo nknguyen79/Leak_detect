@@ -395,6 +395,12 @@ class CFG:
     fig_dpi: int = 300
     save_models: bool = True
     resume: bool = True                        # dùng lại kết quả job đã chạy (cùng cấu hình)
+    # [V2.1] chạy tiếp qua NHIỀU phiên Kaggle: tìm ada_results.pkl (cùng dấu vân tay cấu hình) trong các thư mục
+    #        này — thêm output của phiên bản trước làm Input là đủ; chỉ các job còn thiếu được chạy.
+    resume_dirs: tuple = ("/kaggle/input",)
+    heartbeat_min: float = 5.0                 # [V2.1] luồng chính in tiến độ mỗi N phút (kể cả khi job dài)
+    stall_min: float = 20.0                    # [V2.1] một GPU không tiến triển N phút -> in stack trace mọi luồng
+    save_every_min: float = 3.0                # [V2.1] lưu ada_results.pkl tối đa mỗi N phút (v1/v2: mỗi 10 job)
 
     smoke_test: bool = False
 
@@ -419,6 +425,7 @@ if cfg.smoke_test:
     cfg.ablation_seeds, cfg.tent_steps, cfg.rcst_bag = (42,), 5, (4, 4)
     cfg.run_ssda, cfg.ssda_shots = True, (1,)
     cfg.tsne_max_points, cfg.dev_max = 300, 200
+    cfg.heartbeat_min = 0.2
 
 if not torch.cuda.is_available():
     cfg.amp = False

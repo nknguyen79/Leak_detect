@@ -395,3 +395,25 @@ Thông tin bổ sung từ tác giả dữ liệu: chuỗi S được thu trên *
 | P1.4 Baseline hiện đại | ✅ MCC, TENT; ⏳ SHOT, FixMatch/AdaMatch |
 | P1.5 Dịch chuyển nhãn (EM/BBSE, IW-CDAN) | ⏳ chưa làm |
 | P2 Thêm miền, SSDA, chỉ số vận hành | ⏳ SSDA có sẵn (`cfg.run_ssda=True`); thêm miền cần metadata |
+
+### 9.1 Bản v2.1 — vận hành lượt chạy dài trên Kaggle
+
+Báo cáo từ lần chạy v2 đầu tiên: mục 8 in 2/246 job (source-only, 93–94 s/job — nhanh hơn v1 do v2 rút còn 20 epoch)
+rồi "không thấy đáp ứng". Mã huấn luyện đa luồng giống v1 (v1 đã chạy trọn 126 job), nên nguyên nhân nhiều khả năng là
+phiên tương tác ngừng nhận output, không phải treo. Tuy nhiên v2 không có cách nào phân biệt hai trường hợp, và
+một số điểm vận hành cần sửa:
+
+| Vấn đề | Sửa trong v2.1 |
+|---|---|
+| Không phân biệt được "đang chạy" với "treo"; output chỉ đến từ luồng GPU | Luồng chính in nhịp tim `⏱` (job + epoch từng GPU); `run_log.txt` có dấu thời gian; stack trace mọi luồng khi một GPU không tiến triển quá `cfg.stall_min` phút |
+| Ngắt ô để lại luồng GPU chạy ngầm (luồng daemon), chạy lại ô -> 4 job tranh 2 GPU | Sự kiện dừng: hai luồng thoát ở vòng lặp kế tiếp, kết quả đã xong được lưu |
+| Lưu kết quả mỗi 10 job (mất tới ≈ 12 phút công khi phiên dừng) | Lưu theo thời gian (`cfg.save_every_min`, mặc định 3 phút) |
+| Không chạy tiếp được ở phiên Kaggle mới; đổi `seeds` làm mất mọi job cũ (dấu vân tay gồm cả phạm vi chạy) | Dấu vân tay chỉ gồm thứ làm đổi kết quả một job; tự tìm `ada_results.pkl` trong `/kaggle/input` -> chạy theo giai đoạn |
+| `set_seed()` trong job gọi `manual_seed_all` -> đặt lại RNG của GPU kia giữa job đang chạy (không tái lập) | Gieo riêng RNG CPU + RNG của đúng GPU đó |
+| Ablation/quét λ với seed không có trong `cfg.seeds` -> `KeyError` (thiếu phân hoạch) và so sánh ghép cặp lệch seed | Chỉ dùng seed có trong `cfg.seeds` |
+| Ước lượng 4.5–5 giờ ở bản v2 hơi thấp | ≈ 324 job, ≈ 5–6 giờ trên 2 × T4 (≈ 1.5–2 phút/job/GPU) |
+
+Tín hiệu khoa học sớm từ 2 job đầu (lab → field, source-only): AUC nguồn-val = 1.000 dù đã tách theo bản ghi, nhưng
+AUC đích mức bản ghi chỉ 0.52–0.58. Trong miền S, hai lớp tách hoàn toàn nhưng tín hiệu đó không chuyển sang miền R.
+Điều này khớp với giả thuyết dấu hiệu đặc thù mô hình thí nghiệm (mục 9), cần đối chiếu với bảng mục 3.9 của lượt
+chạy đầy đủ.

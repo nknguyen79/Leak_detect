@@ -729,8 +729,23 @@ code(r'''
 # =========================================================
 # 7.4 Huấn luyện MỘT job (bài toán × seed × fold × phương pháp) / single-job training engine
 # =========================================================
+# [V2.1] Trạng thái từng GPU (job, epoch, vòng lặp, thời điểm tiến triển cuối) do train_job cập nhật -> luồng chính
+#        in nhịp tim và phát hiện treo; _STOP cho phép dừng sạch các luồng khi người dùng ngắt ô (Interrupt).
+_PROG, _STOP = {}, threading.Event()
+
+class JobCancelled(RuntimeError):
+    pass
+
 def job_key(j):
     return f"{j['variant']}|t{j['task']}|s{j['seed']}|f{j['fold']}|{j['method']}|sh{j.get('shots', 0)}"
+
+def _seed_job(seed, device):
+    # [V2.1] chỉ gieo RNG của CPU và của CHÍNH GPU này. set_seed() gọi manual_seed_all -> đặt lại RNG của GPU kia
+    #        giữa lúc job khác đang chạy ở đó (dropout phụ thuộc thời điểm, kết quả không tái lập được).
+    random.seed(seed); np.random.seed(seed); torch.default_generator.manual_seed(seed)
+    if device.type == "cuda":
+        with torch.cuda.device(device):
+            torch.cuda.manual_seed(seed)
 
 def method_hp(job):
     hp = dict(lambda_max=cfg.lambda_max, fir_p=cfg.aug_fir_p, noise_p=cfg.aug_noise_p,
@@ -794,8 +809,9 @@ def train_job(job, device, verbose=False):
     src_tr, src_va = P["src_tr_idx"], P["src_va_idx"]
     seed = 100 * job["seed"] + (0 if job["fold"] is None else job["fold"] + 1) + 7 * job.get("seed_offset", 0)
 
+    pr = _PROG.get(str(device))                    # [V2.1] tiến độ cho nhịp tim/phát hiện treo (None khi chạy lẻ)
     with _BUILD_LOCK:
-        set_seed(seed)
+        _seed_job(seed, device)
         model = LeakNet().to(device)
         disc = None
         if method in ADV_METHODS:
@@ -833,6 +849,8 @@ def train_job(job, device, verbose=False):
     ep_rows, hist_rows, preds, snaps = [], [], {}, {}
     it, n_skip = 0, 0
     for ep in range(cfg.epochs):
+        if pr is not None:
+            pr.update(ep=ep + 1, t=time.time())
         if bag and hp["rcst_pl"] and ep >= rc_start:      # làm mới nhãn giả mức bản ghi đầu mỗi epoch
             s0, s1 = cfg.rcst_sel
             frac = s0 + (s1 - s0) * (ep - rc_start) / max(1, cfg.epochs - 1 - rc_start)
@@ -844,6 +862,10 @@ def train_job(job, device, verbose=False):
             disc.train()
         acc = defaultdict(float); nb = 0
         for _ in range(cfg.iters_per_epoch):
+            if _STOP.is_set():
+                raise JobCancelled(job_key(job))
+            if pr is not None:
+                pr.update(it=it, t=time.time())
             lam = grl_lambda(it, hp["lambda_max"])
             i_s = s_samp.next()
             parts = [fetch(i_s, device, hp["augment"], g, hp)]
@@ -988,18 +1010,50 @@ code(r'''
 # 7.5 Hàng đợi job trên các GPU + AdaBN + lưu/khôi phục / multi-GPU job queue, AdaBN, resume
 # =========================================================
 RES_PATH = OUT / "ada_results.pkl"
-RUN_FP = hashlib.sha1((DATA_FP + json.dumps(_cfg_print, sort_keys=True, default=str)
-                       + str(F_MAX_EFF)).encode()).hexdigest()[:12]
+RUN_LOG = OUT / "run_log.txt"
+# [V2.1] Dấu vân tay chỉ gồm những gì làm THAY ĐỔI kết quả của từng job (dữ liệu, front-end, siêu tham số). Phạm vi
+#        chạy (seed, phương pháp, biến thể ablation...) đã nằm trong khoá job nên không vào dấu vân tay -> có thể
+#        chạy theo giai đoạn (seeds=(42,) trước, sau đó (42, 43, 44)) mà vẫn dùng lại job cũ.
+_SCOPE_KEYS = {"seeds", "methods", "ablation_variants", "ablation_seeds", "sweep_seeds", "lambda_grid", "run_ssda",
+               "ssda_shots", "run_lambda_sweep", "run_ablation", "run_band_occlusion", "run_shortcut_check",
+               "resume", "resume_dirs", "parallel_jobs", "max_parallel", "save_models", "out_dir", "fig_dpi",
+               "heartbeat_min", "stall_min", "save_every_min", "bootstrap_n", "tsne_max_points"}
+RUN_FP = hashlib.sha1((DATA_FP + json.dumps({k: v for k, v in _cfg_print.items() if k not in _SCOPE_KEYS},
+                                            sort_keys=True, default=str)
+                       + f"{F_MIN_EFF}|{F_MAX_EFF}").encode()).hexdigest()[:12]
+
+_LOG_LOCK = threading.Lock()
+def log(msg, echo=True):
+    # In ra ô (flush ngay) VÀ ghi vào run_log.txt có dấu thời gian: nếu giao diện Kaggle ngừng nhận output
+    # (mất kết nối trình duyệt), tiến độ vẫn còn trong tệp và trong Log của phiên bản "Save & Run All".
+    if echo:
+        print(msg, flush=True)
+    with _LOG_LOCK:
+        with open(RUN_LOG, "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+
+def _result_files():
+    out = [RES_PATH]
+    for d in cfg.resume_dirs:
+        d = Path(d)
+        if d.exists():
+            for pat in ("*/ada_results.pkl", "*/*/ada_results.pkl", "*/*/*/ada_results.pkl", "*/*/*/*/ada_results.pkl"):
+                out += sorted(d.glob(pat))
+    return [p for p in dict.fromkeys(out) if p.exists()]
+
 RESULTS = {}
-if cfg.resume and RES_PATH.exists():
-    try:
-        _blob = pickle.load(open(RES_PATH, "rb"))
-        if _blob.get("fp") == RUN_FP:
-            RESULTS = _blob["results"]; print(f"Khôi phục {len(RESULTS)} job đã chạy (cùng cấu hình {RUN_FP}).")
-        else:
-            print("Kết quả cũ thuộc cấu hình khác -> chạy lại từ đầu.")
-    except Exception as e:
-        print("Không đọc được kết quả cũ:", type(e).__name__)
+if cfg.resume:
+    for _p in _result_files():
+        try:
+            _blob = pickle.load(open(_p, "rb"))
+        except Exception as e:
+            print(f"Không đọc được {_p}: {type(e).__name__}"); continue
+        if _blob.get("fp") != RUN_FP:
+            print(f"Bỏ qua {_p}: thuộc cấu hình khác ({_blob.get('fp')} ≠ {RUN_FP})."); continue
+        _new = {k: v for k, v in _blob["results"].items() if k not in RESULTS}
+        RESULTS.update(_new)
+        print(f"Khôi phục {len(_new)} job từ {_p} (cấu hình {RUN_FP}).")
+print(f"Dấu vân tay cấu hình: {RUN_FP} | {len(RESULTS)} job có sẵn | nhật ký: {RUN_LOG}")
 
 _SAVE_LOCK = threading.Lock()
 def save_results():
@@ -1008,50 +1062,97 @@ def save_results():
         pickle.dump(dict(fp=RUN_FP, results=RESULTS), open(tmp, "wb"))
         os.replace(tmp, RES_PATH)
 
+def _job_devices():
+    ngpu = torch.cuda.device_count() if DEVICE.type == "cuda" else 0
+    return ([torch.device(f"cuda:{i}") for i in range(min(ngpu, cfg.max_parallel))]
+            if (cfg.parallel_jobs and ngpu > 1) else [DEVICE])
+
+def _job_name(j):
+    return f"{j['variant']} {TASKS[j['task']]['name']} s{j['seed']} f{j['fold']} {j['method']}"
+
+def _dump_stacks(why):
+    frames = sys._current_frames()
+    lines = [f"!! {why} — stack trace của mọi luồng:"]
+    for t in threading.enumerate():
+        lines.append(f"--- luồng {t.name} ---")
+        lines += [l.rstrip() for l in traceback.format_stack(frames.get(t.ident))] if t.ident in frames else []
+    log("\n".join(lines))
+
 def run_jobs(jobs, title=""):
     jobs = [j for j in jobs if job_key(j) not in RESULTS]
     if not jobs:
-        print(f"[{title}] mọi job đã có kết quả."); return
-    ngpu = torch.cuda.device_count() if DEVICE.type == "cuda" else 0
-    devices = ([torch.device(f"cuda:{i}") for i in range(min(ngpu, cfg.max_parallel))]
-               if (cfg.parallel_jobs and ngpu > 1) else [DEVICE])
-    print(f"[{title}] {len(jobs)} job trên {[str(d) for d in devices]}")
+        log(f"[{title}] mọi job đã có kết quả."); return
+    devices = _job_devices()
+    log(f"[{title}] {len(jobs)} job trên {[str(d) for d in devices]} | nhịp tim mỗi {cfg.heartbeat_min:g} phút "
+        f"| nhật ký {RUN_LOG.name}")
     q = queue.Queue()
     for j in jobs:
         q.put(j)
     lock, done, t0, failed = threading.Lock(), [0], time.time(), []
+    last_save = [time.time()]
+    _STOP.clear(); _PROG.clear()
 
     def worker(dev):
-        while True:
+        while not _STOP.is_set():
             try:
                 j = q.get_nowait()
             except queue.Empty:
                 return
+            _PROG[str(dev)] = dict(name=_job_name(j), ep=0, it=0, t=time.time(), t_job=time.time())
+            log(f"  ▶ {_job_name(j)} @{dev}", echo=False)
             try:
                 r = train_job(j, dev)
                 with lock:
                     RESULTS[r["key"]] = r; done[0] += 1
                     el = time.time() - t0; eta = el / done[0] * (len(jobs) - done[0])
                     h = r["hist"].set_index("epoch").loc[r["sel"][cfg.select_rule]]
-                    print(f"  [{done[0]:3d}/{len(jobs)}] {j['variant']:>10s} {TASKS[j['task']]['name']:>18s} "
-                          f"s{j['seed']} f{j['fold']} {j['method']:<11s} {r['time_s']:5.0f}s @{dev} | "
-                          f"srcval AUC {h.src_val_auc:.3f} | [giám sát] tgt rec-AUC {h.tgt_auc_rec:.3f} | ETA {eta / 60:.0f} ph")
-                    if done[0] % 10 == 0:
-                        save_results()
+                    log(f"  [{done[0]:3d}/{len(jobs)}] {j['variant']:>10s} {TASKS[j['task']]['name']:>18s} "
+                        f"s{j['seed']} f{j['fold']} {j['method']:<11s} {r['time_s']:5.0f}s @{dev} | "
+                        f"srcval AUC {h.src_val_auc:.3f} | [giám sát] tgt rec-AUC {h.tgt_auc_rec:.3f} | ETA {eta / 60:.0f} ph")
+                    if time.time() - last_save[0] >= 60 * cfg.save_every_min:
+                        save_results(); last_save[0] = time.time()
+            except JobCancelled:
+                return
             except Exception as e:
                 with lock:
-                    failed.append(j); print(f"  !! {job_key(j)} lỗi trên {dev}: {type(e).__name__}: {e}")
-                    traceback.print_exc()
+                    failed.append(j)
+                    log(f"  !! {job_key(j)} lỗi trên {dev}: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            finally:
+                _PROG.pop(str(dev), None)
 
-    ths = [threading.Thread(target=worker, args=(d,), daemon=True) for d in devices]
+    ths = [threading.Thread(target=worker, args=(d,), name=f"job@{d}", daemon=True) for d in devices]
     for t in ths:
         t.start()
-    for t in ths:
-        t.join()
-    for j in failed:                                   # chạy lại tuần tự một lần
-        r = train_job(j, devices[0]); RESULTS[r["key"]] = r
+    last_hb, stalled = time.time(), set()
+    try:
+        while True:
+            alive = [t for t in ths if t.is_alive()]
+            if not alive:
+                break
+            alive[0].join(timeout=5.0)
+            now = time.time()
+            if now - last_hb >= 60 * cfg.heartbeat_min:
+                last_hb = now
+                busy = " | ".join(f"{d}: {v['name']} ep {v['ep']}/{cfg.epochs} ({(now - v['t_job']) / 60:.1f} ph)"
+                                  for d, v in sorted(_PROG.items())) or "—"
+                log(f"  ⏱ {done[0]}/{len(jobs)} xong sau {(now - t0) / 60:.0f} ph | đang chạy: {busy}")
+            for d, v in list(_PROG.items()):
+                if now - v["t"] > 60 * cfg.stall_min and (d, v["name"]) not in stalled:
+                    stalled.add((d, v["name"]))
+                    _dump_stacks(f"{d} không tiến triển {(now - v['t']) / 60:.0f} phút ở job {v['name']}")
+    except KeyboardInterrupt:
+        _STOP.set()
+        log(f"[{title}] NGẮT: chờ các luồng dừng ở vòng lặp kế tiếp, lưu {len(RESULTS)} job đã xong...")
+        for t in ths:
+            t.join(timeout=120)
+        save_results()
+        raise
     save_results()
-    print(f"[{title}] xong trong {(time.time() - t0) / 60:.1f} phút")
+    for j in failed:                                   # chạy lại tuần tự một lần (kết quả đã xong đã được lưu)
+        log(f"  ↻ chạy lại {_job_name(j)} trên {devices[0]}")
+        r = train_job(j, devices[0]); RESULTS[r["key"]] = r
+        save_results()
+    log(f"[{title}] xong trong {(time.time() - t0) / 60:.1f} phút")
 
 def _bn_layers(m):
     return [x for x in m.modules() if isinstance(x, nn.modules.batchnorm._BatchNorm)]
@@ -1128,7 +1229,7 @@ def run_posthoc(variant="main", methods=None):
                                                state=None, n_skip=0, time_s=time.time() - t0, device=str(DEVICE))
                     n += 1
     save_results()
-    print(f"Hậu kiểm {methods}: {n} lượt (từ mô hình source-only của từng seed).")
+    log(f"Hậu kiểm {methods}: {n} lượt (từ mô hình source-only của từng seed).")
 
 run_adabn = lambda variant="main": run_posthoc(variant, ["adabn"])
 print("Job runner OK")
@@ -1142,6 +1243,17 @@ md(r'''
 
 `bài toán × seed × fold × phương pháp`. `source_only` chạy một lần mỗi seed (giữ trọng số cho AdaBN), các phương pháp
 còn lại chạy theo từng fold đích. Trọng số (seed đầu, fold 0) được giữ cho phân tích không gian đặc trưng ở mục 11.
+
+**Theo dõi một lượt chạy dài (v2.1).** Ô này chạy nhiều giờ (≈ 1.5–2 phút/job/GPU, ≈ 5–6 giờ cho cấu hình mặc định).
+- Mỗi job xong in một dòng; **luồng chính in nhịp tim `⏱` mỗi `cfg.heartbeat_min` phút** (job + epoch đang chạy trên
+  từng GPU). Nếu một GPU không tiến triển quá `cfg.stall_min` phút, stack trace của mọi luồng được in ra để chẩn đoán.
+- Mọi dòng tiến độ đồng thời ghi vào `run_log.txt` (thư mục output). Ở **phiên tương tác**, nếu trình duyệt mất kết
+  nối thì ô **ngừng hiện output dù kernel vẫn chạy** — đó không phải treo. Nên chạy bằng **Save Version → Save & Run
+  All (Commit)**: lượt chạy diễn ra phía máy chủ, xem tiến độ ở tab *Logs* của phiên bản.
+- `ada_results.pkl` được lưu mỗi `cfg.save_every_min` phút. Chạy lại ô (cùng phiên) hoặc thêm output của phiên bản
+  trước làm **Input** (phiên mới) -> chỉ các job còn thiếu được chạy. Có thể chạy theo giai đoạn: `seeds=(42,)` trước
+  (≈ 1/3 thời gian), sau đó `seeds=(42, 43, 44)`.
+- Ngắt ô (■ Interrupt) dừng sạch cả hai luồng GPU ở vòng lặp kế tiếp và lưu các job đã xong.
 ''')
 
 code(r'''
