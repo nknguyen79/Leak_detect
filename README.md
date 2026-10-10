@@ -9,6 +9,9 @@ Low-Pressure PVC Water Distribution Pipes Using Deep Convolutional Neural Networ
 | `notebooks/leak-cnn-pvc-kaggle-v6.ipynb` | Bản v6 gốc (kèm output của lần chạy trên 80 bản ghi) — nguồn để dựng v7. |
 | `tools/build_v7.py`, `tools/v7_cells.py` | Dựng v7 **tái lập được** từ v6: mỗi chỉnh sửa là một phép thay thế có kiểm tra. |
 | `tools/run_smoke.py` | Chạy end-to-end ở chế độ smoke (3 epoch, 2 fold, dữ liệu mô phỏng) để kiểm tra toàn tuyến. |
+| `notebooks/leak-ada-dann-kaggle-v1.ipynb` | **Thích ứng miền đối nghịch** (DANN, CDAN+E + AdaBN, Deep CORAL, oracle) cho tập đa miền `tapdulieuMix_16k`. |
+| `tools/build_ada.py`, `tools/ada_cells_{1,2,3}.py` | Dựng notebook ADA từ nội dung cell (biên dịch thử mọi cell trước khi ghi). |
+| `docs/KE_HOACH_ADA.md` | Kế hoạch chi tiết: phân tích dữ liệu, thiết kế phương pháp, giao thức đánh giá, tham số, danh mục hình/bảng cho bài báo, ngân sách tính toán, lộ trình. |
 
 ## Chạy
 
@@ -49,3 +52,18 @@ python tools/build_v7.py notebooks/leak-cnn-pvc-kaggle-v6.ipynb notebooks/leak-c
 | D1–D2 | Gán nhãn theo từ; dò thư mục dữ liệu an toàn; không còn số liệu cũ viết cứng trong văn bản. |
 
 Chi tiết: mục 16 của notebook v7.
+
+## Thích ứng miền đối nghịch (ADA v1) — tập `tapdulieuMix_16k`
+
+Xem kế hoạch đầy đủ ở [`docs/KE_HOACH_ADA.md`](docs/KE_HOACH_ADA.md).
+
+**Kaggle:** tải thư mục `tapdulieuMix_16k` lên thành dataset (giữ cấu trúc `<miền>/<leak|noleak>/...`), `Add Data`,
+bật GPU T4 x2, chạy tới mục 2.4 để xác nhận các miền được nhận ra, rồi `Run All`. Kết quả gom trong
+`/kaggle/working/ada_paper_artifacts.zip` (bảng CSV/LaTeX/Markdown, hình PNG+PDF, văn bản nháp Methods/Results).
+
+**Kiểm tra nhanh ngoài Kaggle (CPU, dữ liệu mô phỏng hai miền):**
+
+```bash
+python tools/build_ada.py notebooks/leak-ada-dann-kaggle-v1.ipynb
+LEAK_OUT=/tmp/ada_smoke python tools/run_smoke.py notebooks/leak-ada-dann-kaggle-v1.ipynb
+```
