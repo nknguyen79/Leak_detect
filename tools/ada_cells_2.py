@@ -24,16 +24,18 @@ md(r'''
 | $G_f$ — trích đặc trưng | 4 × [Conv3×3–BN–ReLU ×2, Squeeze-Excitation, MaxPool, Dropout2d 0.1], kênh 32/64/128/256 (giống `LeakCNN2D` v7) → GAP ⊕ GMP | 512 |
 | Bottleneck | FC 512→256, BN, ReLU, Dropout 0.3 → **đặc trưng $f$ dùng để căn chỉnh miền** | 256 |
 | $G_y$ — dự đoán nhãn | FC 256→1 (sigmoid) | xác suất rò rỉ |
-| $G_d$ — phân biệt miền (DANN) | **GRL($-\lambda_p$)** → FC 256→256–ReLU–Dropout 0.5 → FC 256→256–ReLU–Dropout 0.5 → FC 256→1 | nguồn / đích |
+| $G_d$ — phân biệt miền (DANN, RCST) | **GRL($-\lambda_p$)** → FC 256→1024–ReLU–Dropout 0.5 → FC 1024→1024–ReLU–Dropout 0.5 → FC 1024→1, **lr ×10** (theo bản cài đặt gốc; v1 dùng 256 / ×1 — quá yếu) | nguồn / đích |
 | $G_d$ — CDAN(+E) | GRL → **$f \otimes g$** (256 × 2 = 512, $g=[1-p, p]$ tách gradient) → cùng MLP | nguồn / đích |
-| Deep CORAL / MK-MMD | Không có $G_d$; thêm $\lambda_p \cdot$ CORAL($f_s, f_t$) hoặc MMD($f_s, f_t$) | — |
+| Deep CORAL / MK-MMD / MCC | Không có $G_d$; thêm $\lambda_p \cdot$ CORAL($f_s, f_t$), MMD($f_s, f_t$) hoặc MCC(dự đoán đích) | — |
+| Joint-BN (đối chứng cơ chế) | Lô trộn nguồn + đích qua cùng một lượt truyền, **không** có hàm căn chỉnh nào | — |
+| **RCST (đề xuất)** | DANN + nhãn giả **mức bản ghi** (trung bình xác suất các frame, chọn cân bằng theo thứ hạng, tỉ lệ tăng dần) + phạt **không nhất quán giữa các frame cùng bản ghi**; lô đích = 8 bản ghi × 8 frame | — |
 
 Dùng **cùng một $G_f$ + $G_y$** cho mọi phương pháp → khác biệt kết quả chỉ đến từ mục tiêu căn chỉnh miền.
 ''')
 
 code(r'''
 # =========================================================
-# 5.1 Front-end log-Mel + SpecAugment (từ v7, f_max = băng thông chung)
+# 5.1 Front-end log-Mel + SpecAugment (từ v7; [V2] dải f_min-f_max = dải chung sau hoà hợp chuỗi thu)
 # =========================================================
 def _safe_norm(m):
     m = torch.nan_to_num(m, nan=0.0, posinf=0.0, neginf=-80.0)
@@ -73,7 +75,7 @@ class LogMelFrontend(nn.Module):
         super().__init__()
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=cfg.target_sr, n_fft=cfg.n_fft, hop_length=cfg.hop_length, n_mels=cfg.n_mels,
-            f_min=cfg.f_min, f_max=F_MAX_EFF, power=2.0, center=True)
+            f_min=F_MIN_EFF, f_max=F_MAX_EFF, power=2.0, center=True)
         self.to_db = torchaudio.transforms.AmplitudeToDB(stype="power", top_db=80.0)
         self.specaug = specaug
     def forward(self, x):
@@ -86,7 +88,7 @@ class LogMelFrontend(nn.Module):
 with torch.no_grad():
     _s = LogMelFrontend()(torch.from_numpy(np.asarray(X_ALL[:2])).float())
 SPEC_SHAPE = tuple(_s.shape[1:])
-print("log-Mel:", SPEC_SHAPE, f"| 0-{F_MAX_EFF:.0f} Hz")
+print("log-Mel:", SPEC_SHAPE, f"| {F_MIN_EFF:.0f}-{F_MAX_EFF:.0f} Hz")
 ''')
 
 code(r'''
@@ -153,9 +155,12 @@ class LeakNet(nn.Module):
         if self.backbone == "cnn2d":
             return self.trunk_from_spec(self.front(x))
         x = x.float()
-        if HARMONISED:                                         # cùng giới hạn băng thông với front-end phổ
+        if HARMONISED:                                         # cùng dải chung với front-end phổ
             with amp_autocast(x.device, False):
-                x = torchaudio.functional.lowpass_biquad(x, cfg.target_sr, F_MAX_EFF)
+                if F_MAX_EFF < cfg.target_sr / 2 - 1:
+                    x = torchaudio.functional.lowpass_biquad(x, cfg.target_sr, F_MAX_EFF)
+                if F_MIN_EFF > 25:
+                    x = torchaudio.functional.highpass_biquad(x, cfg.target_sr, F_MIN_EFF)
         x = (x - x.mean(-1, keepdim=True)) / x.std(-1, keepdim=True).clamp_min(1e-4)
         return gap_gmp(self.net1d(x.unsqueeze(1)))
     def head(self, z):
@@ -216,6 +221,26 @@ def mmd_loss(fs, ft, mults=(0.25, 0.5, 1.0, 2.0, 4.0)):
     K = sum(torch.exp(-d2 / (bw * m + 1e-9)) for m in mults)
     return K[:ns, :ns].mean() + K[ns:, ns:].mean() - 2 * K[:ns, ns:].mean()
 
+def mcc_loss(logit_t, T=None):
+    # Minimum Class Confusion (Jin et al., ECCV 2020) cho bài toán 2 lớp: giảm "nhầm lẫn lớp" giữa các mẫu
+    # đích (ma trận tương quan dự đoán có trọng số entropy), không cần căn chỉnh phân bố.
+    T = cfg.mcc_temp if T is None else T
+    p = torch.sigmoid(logit_t.float() / T)
+    P = torch.stack([1 - p, p], 1)
+    H = -(P * torch.log(P + 1e-6)).sum(1)
+    w = 1 + torch.exp(-H)
+    w = (len(w) * w / w.sum()).detach()
+    C = (P * w[:, None]).t() @ P
+    C = C / C.sum(1, keepdim=True).clamp_min(1e-6)
+    return (C.sum() - torch.trace(C)) / 2
+
+def record_consistency(logit_t, grp, n_groups):
+    # [V2-RCST] phương sai xác suất giữa các frame CỦA CÙNG MỘT BẢN GHI trong lô (mọi frame chung một nhãn).
+    p = torch.sigmoid(logit_t.float())
+    cnt = torch.zeros(n_groups, device=p.device).index_add_(0, grp, torch.ones_like(p)).clamp_min(1)
+    m = torch.zeros(n_groups, device=p.device).index_add_(0, grp, p) / cnt
+    return 4 * ((p - m[grp]) ** 2).mean()                  # x4 -> thang [0, 1]
+
 # ---- Kiểm thử đơn vị / unit tests ----------------------------------------------------
 _x = torch.randn(4, 3, requires_grad=True)
 GradReverse.apply(_x, 0.5).sum().backward()
@@ -228,7 +253,11 @@ assert _lg.shape == (3,) and _f.shape == (3, cfg.bottleneck_dim)
 assert cdan_input(_f, _lg).shape == (3, 2 * cfg.bottleneck_dim)
 _w = entropy_weights(_lg[:2], _lg[2:])
 assert abs(float(_w.sum()) - 2.0) < 1e-5
-print("✓ GRL, CORAL, MMD, CDAN, trọng số entropy: kiểm thử đơn vị đạt.")
+assert float(mcc_loss(torch.tensor([9., 9., -9., -9.]))) < float(mcc_loss(torch.zeros(4)))   # tự tin -> ít nhầm lẫn
+_g = torch.tensor([0, 0, 1, 1])
+assert float(record_consistency(torch.tensor([2., 2., -3., -3.]), _g, 2)) < 1e-8
+assert float(record_consistency(torch.tensor([5., -5., 0., 0.]), _g, 2)) > 0.1
+print("✓ GRL, CORAL, MMD, CDAN, trọng số entropy, MCC, nhất quán bản ghi: kiểm thử đơn vị đạt.")
 ''')
 
 code(r'''
@@ -273,7 +302,7 @@ _box(ax, (10.5, 3.6), 2.0, 0.9, "Label predictor $G_y$\nFC → sigmoid", "#F6E0D
 _box(ax, (13.0, 3.6), 2.1, 0.9, "$\\mathcal{L}_y$: BCE\n(source labels)", "#FFFFFF")
 _box(ax, (10.2, 0.4), 1.0, 0.9, "GRL\n$-\\lambda_p$", "#F3E3C3")
 _box(ax, (11.5, 0.4), 1.5, 0.9, "CDAN: f ⊗ g\n(optional)", "#FFFFFF", ls="--")
-_box(ax, (13.3, 0.4), 1.9, 0.9, "Domain disc. $G_d$\nMLP 256-256-1", "#E4DDF0")
+_box(ax, (13.3, 0.4), 1.9, 0.9, f"Domain disc. $G_d$\nMLP {cfg.disc_hidden}-{cfg.disc_hidden}-1", "#E4DDF0")
 _arrow(ax, (1.7, 2.5), (2.1, 2.5)); _arrow(ax, (4.6, 2.5), (5.0, 2.5)); _arrow(ax, (7.6, 2.5), (8.0, 2.5))
 _arrow(ax, (9.8, 2.7), (10.5, 4.0)); _arrow(ax, (12.5, 4.05), (13.0, 4.05))
 _arrow(ax, (9.8, 2.3), (10.2, 0.9)); _arrow(ax, (11.2, 0.85), (11.5, 0.85)); _arrow(ax, (13.0, 0.85), (13.3, 0.85))
@@ -492,9 +521,24 @@ def get_resident(device):
     return _RES[key]
 
 def wave_augment(xb, g, hp):
-    # Đáp ứng kênh FIR ngẫu nhiên | nhiễu Gauss theo SNR | dịch vòng — theo lô, trên thiết bị của lô.
+    # [V2] ngẫu nhiên hoá chuỗi thu | đáp ứng kênh FIR ngẫu nhiên | nhiễu Gauss theo SNR | dịch vòng
+    #      — theo lô, trên thiết bị của lô, mỗi mẫu một tham số riêng.
     B, T = xb.shape; dev = xb.device
     rnd = lambda n: torch.rand(n, device=dev, generator=g)
+    m = rnd(B) < hp.get("chain_p", 0.0)
+    if bool(m.any()):
+        # Thông cao Butterworth bậc 2 (fc ngẫu nhiên: mô phỏng cảm biến/máy ghi cắt tần thấp khác nhau — đúng
+        # loại lệch giữa chuỗi R và S ở v1), độ dốc phổ ±dB/octave, thông thấp bậc 4; pha 0, miền tần số.
+        X = torch.fft.rfft(xb, dim=1)
+        f = torch.fft.rfftfreq(T, d=1.0 / cfg.target_sr).to(dev)
+        lo, hi = cfg.aug_hp_hz; fc = (lo + rnd(B) * (hi - lo))[:, None]
+        t0, t1 = cfg.aug_tilt_db_oct; sl = (t0 + rnd(B) * (t1 - t0))[:, None]
+        l0, l1 = cfg.aug_lp_hz; fl = (l0 + rnd(B) * (l1 - l0))[:, None]
+        H = (1.0 / torch.sqrt(1.0 + (fc / f.clamp_min(1.0)) ** 4)
+             * (f.clamp_min(20.0) / 1000.0) ** (sl / 6.0206)
+             * 1.0 / torch.sqrt(1.0 + (f / fl) ** 8))
+        H = torch.where(m[:, None], H, torch.ones_like(H))
+        xb = torch.fft.irfft(X * H, n=T, dim=1)
     m = rnd(B) < hp["fir_p"]
     if bool(m.any()):
         taps = cfg.aug_fir_taps + (1 - cfg.aug_fir_taps % 2)
@@ -545,6 +589,18 @@ class Sampler:
             return self._take(0, self.bs)
         h = self.bs // 2
         return np.concatenate([self._take(0, self.bs - h), self._take(1, h)])
+
+class BagSampler:
+    # [V2-RCST] lô đích = n_rec bản ghi × k frame mỗi bản ghi -> phạt được sự KHÔNG nhất quán trong bản ghi.
+    def __init__(self, idx, n_rec, k, seed):
+        idx = np.asarray(idx, dtype=np.int64); u = uid_all[idx]
+        o = np.argsort(u, kind="stable"); us = u[o]
+        self.groups = np.split(idx[o], np.flatnonzero(us[1:] != us[:-1]) + 1)
+        self.rng = np.random.default_rng(int(seed)); self.n_rec, self.k = int(n_rec), int(k)
+    def next(self):
+        r = self.rng.choice(len(self.groups), self.n_rec, replace=len(self.groups) < self.n_rec)
+        out = [self.rng.choice(self.groups[i], self.k, replace=len(self.groups[i]) < self.k) for i in r]
+        return np.concatenate(out), np.repeat(np.arange(self.n_rec), self.k)
 
 def subsample(idx, n, seed):
     idx = np.asarray(idx)
@@ -678,10 +734,12 @@ def job_key(j):
 
 def method_hp(job):
     hp = dict(lambda_max=cfg.lambda_max, fir_p=cfg.aug_fir_p, noise_p=cfg.aug_noise_p,
-              shift_p=cfg.aug_shift_p, augment=cfg.augment, balanced=cfg.class_balanced_source)
+              shift_p=cfg.aug_shift_p, chain_p=cfg.aug_chain_p, augment=cfg.augment,
+              balanced=cfg.class_balanced_source, disc_hidden=cfg.disc_hidden, disc_dropout=cfg.disc_dropout,
+              disc_lr_mult=cfg.disc_lr_mult, rcst_pl=True, rcst_cons=True)
     hp.update(job.get("hp", {}))
     if not hp["augment"]:
-        hp["fir_p"] = hp["noise_p"] = hp["shift_p"] = 0.0
+        hp["fir_p"] = hp["noise_p"] = hp["shift_p"] = hp["chain_p"] = 0.0
     return hp
 
 def job_target_split(job):
@@ -691,7 +749,7 @@ def job_target_split(job):
     return P["fold_idx"][job["fold"]]
 
 def labelled_target(job, tgt_tr):
-    shots = job.get("shots", -1 if job["method"] == "oracle" else 0)
+    shots = job.get("shots", -1 if job["method"] in ("oracle", "target_only") else 0)
     if shots == 0:
         return np.array([], dtype=np.int64)
     uids = pd.unique(uid_all[np.asarray(tgt_tr)])
@@ -703,6 +761,28 @@ def labelled_target(job, tgt_tr):
             pick += list(rng.choice(u, min(shots, len(u)), replace=False))
         uids = pick
     return frames_of(uids)
+
+def rcst_pseudo_labels(model, tgt_tr, device, frac):
+    # [V2-RCST] Nhãn giả MỨC BẢN GHI: xác suất bản ghi = trung bình xác suất frame (chế độ eval, không augment);
+    # chọn cân bằng theo THỨ HẠNG (frac/2 bản ghi cao nhất -> leak, frac/2 thấp nhất -> noleak) nên không phụ
+    # thuộc ngưỡng 0.5 (vốn lệch khi có dịch chuyển miền). Nhãn thật chỉ dùng để GIÁM SÁT chất lượng nhãn giả.
+    tgt_tr = np.asarray(tgt_tr)
+    p = infer(model, tgt_tr, device)
+    g = rec_probs_from(tgt_tr, p).sort_values("p")
+    n_each = max(1, int(round(frac * len(g) / 2)))
+    neg, pos = list(g.index[:n_each]), [u for u in g.index[::-1][:n_each] if u not in set(g.index[:n_each])]
+    vec = np.full(N_FRAMES, -1.0, dtype=np.float32)
+    for u in pos:
+        vec[FR_BY_UID[u]] = 1.0
+    for u in neg:
+        vec[FR_BY_UID[u]] = 0.0
+    lab = np.r_[np.ones(len(pos)), np.zeros(len(neg))]
+    acc_rec = float(np.mean(lab == g.loc[pos + neg, "y"].values))
+    o = np.argsort(p); k = int(round(frac * len(p) / 2))            # đối chứng: nhãn giả MỨC FRAME cùng độ phủ
+    yt = y_all[tgt_tr]
+    acc_fr = float(np.mean(np.r_[yt[o[:k]] == 0, yt[o[::-1][:k]] == 1])) if k else np.nan
+    return torch.as_tensor(vec, device=device), dict(pl_cov=(len(pos) + len(neg)) / len(g),
+                                                     pl_acc_rec=acc_rec, pl_acc_frame=acc_fr)
 
 def train_job(job, device, verbose=False):
     t0 = time.time()
@@ -719,30 +799,46 @@ def train_job(job, device, verbose=False):
         model = LeakNet().to(device)
         disc = None
         if method in ADV_METHODS:
-            disc = DomainDisc(cfg.bottleneck_dim * (2 if method.startswith("cdan") else 1)).to(device)
+            disc = DomainDisc(cfg.bottleneck_dim * (2 if method.startswith("cdan") else 1),
+                              hidden=hp["disc_hidden"], p=hp["disc_dropout"]).to(device)
     if hasattr(model, "specaug"):
         model.specaug.generator = torch.Generator().manual_seed(seed * 7919 + 13)
     g = torch.Generator(device=device); g.manual_seed(seed + 1)
     Y = torch.as_tensor(y_all, device=device)
-    s_samp = Sampler(src_tr, cfg.batch_size, seed + 2, balanced=hp["balanced"])
-    t_samp = Sampler(tgt_tr, cfg.batch_size, seed + 3) if use_tgt else None
-    l_samp = Sampler(lab_idx, max(8, cfg.batch_size // 2), seed + 4, balanced=True) if len(lab_idx) else None
+    if method == "target_only":                   # cận trên thứ hai: CHỈ đích có nhãn (cùng fold), không nguồn
+        s_samp, l_samp = Sampler(lab_idx, cfg.batch_size, seed + 2, balanced=True), None
+    else:
+        s_samp = Sampler(src_tr, cfg.batch_size, seed + 2, balanced=hp["balanced"])
+        l_samp = Sampler(lab_idx, max(8, cfg.batch_size // 2), seed + 4, balanced=True) if len(lab_idx) else None
+    bag = method == "rcst"
+    t_samp = None
+    if use_tgt:
+        t_samp = (BagSampler(tgt_tr, cfg.rcst_bag[0], cfg.rcst_bag[1], seed + 3) if bag
+                  else Sampler(tgt_tr, cfg.batch_size, seed + 3))
     pw = None
-    if not hp["balanced"]:
+    if not hp["balanced"] and method != "target_only":
         pos = float(y_all[src_tr].sum()); pw = torch.tensor([(len(src_tr) - pos) / max(pos, 1.0)], device=device)
 
     groups = [{"params": model.parameters(), "lr": cfg.lr}]
     if disc is not None:
-        groups.append({"params": disc.parameters(), "lr": cfg.lr * cfg.disc_lr_mult})
+        groups.append({"params": disc.parameters(), "lr": cfg.lr * hp["disc_lr_mult"]})
     opt = torch.optim.AdamW(groups, weight_decay=cfg.weight_decay)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_factor)
     scaler = make_grad_scaler(amp_on(device))
     all_params = list(model.parameters()) + (list(disc.parameters()) if disc is not None else [])
     eps = cfg.label_smoothing
+    rc_start = int(math.ceil(cfg.rcst_start_frac * cfg.epochs))
+    pl_vec, pl_info = None, {}
 
     ep_rows, hist_rows, preds, snaps = [], [], {}, {}
     it, n_skip = 0, 0
     for ep in range(cfg.epochs):
+        if bag and hp["rcst_pl"] and ep >= rc_start:      # làm mới nhãn giả mức bản ghi đầu mỗi epoch
+            s0, s1 = cfg.rcst_sel
+            frac = s0 + (s1 - s0) * (ep - rc_start) / max(1, cfg.epochs - 1 - rc_start)
+            pl_vec, pl_info = rcst_pseudo_labels(model, tgt_tr, device, frac)
+        w_pl = (cfg.rcst_pl_weight * min(1.0, (ep - rc_start + 1) / max(1.0, (cfg.epochs - rc_start) / 2))
+                if pl_vec is not None else 0.0)
         model.train()
         if disc is not None:
             disc.train()
@@ -753,7 +849,11 @@ def train_job(job, device, verbose=False):
             parts = [fetch(i_s, device, hp["augment"], g, hp)]
             ns, nt = len(i_s), 0
             if use_tgt:
-                i_t = t_samp.next(); parts.append(fetch(i_t, device, hp["augment"], g, hp)); nt = len(i_t)
+                if bag:
+                    i_t, grp = t_samp.next(); grp = torch.as_tensor(grp, device=device)
+                else:
+                    i_t = t_samp.next()
+                parts.append(fetch(i_t, device, hp["augment"], g, hp)); nt = len(i_t)
             y_lab = Y[torch.as_tensor(i_s, device=device)]
             if l_samp is not None:
                 i_l = l_samp.next(); parts.append(fetch(i_l, device, hp["augment"], g, hp))
@@ -764,10 +864,11 @@ def train_job(job, device, verbose=False):
                 logit_lab = torch.cat([logit[:ns], logit[ns + nt:]])
                 loss_cls = F.binary_cross_entropy_with_logits(logit_lab.float(), y_lab * (1 - eps) + eps / 2,
                                                               pos_weight=pw)
-                loss_da = torch.zeros((), device=device); d_acc = np.nan
+                loss_da = torch.zeros((), device=device); loss_st = torch.zeros((), device=device)
+                d_acc = np.nan
                 if method in ADV_METHODS:
                     dy = torch.cat([torch.ones(ns, device=device), torch.zeros(nt, device=device)])
-                    h = f[:ns + nt] if method == "dann" else cdan_input(f[:ns + nt], logit[:ns + nt])
+                    h = cdan_input(f[:ns + nt], logit[:ns + nt]) if method.startswith("cdan") else f[:ns + nt]
                     d = disc(h, lam).float()
                     if method == "cdan_e":
                         w = entropy_weights(logit[:ns], logit[ns:ns + nt])
@@ -779,21 +880,36 @@ def train_job(job, device, verbose=False):
                     loss_da = grl_lambda(it, cfg.coral_weight) * coral_loss(f[:ns], f[ns:ns + nt])
                 elif method == "mmd":
                     loss_da = grl_lambda(it, cfg.mmd_weight) * mmd_loss(f[:ns], f[ns:ns + nt])
-                loss = loss_cls + loss_da
+                elif method == "mcc":
+                    loss_da = grl_lambda(it, cfg.mcc_weight) * mcc_loss(logit[ns:ns + nt])
+                # joint_bn: KHÔNG có hàm căn chỉnh — chỉ lô trộn nguồn + đích đi qua BatchNorm
+                if bag:
+                    lt = logit[ns:ns + nt]
+                    if hp["rcst_cons"]:
+                        loss_st = loss_st + grl_lambda(it, cfg.rcst_cons_weight) * record_consistency(
+                            lt, grp, cfg.rcst_bag[0])
+                    if pl_vec is not None:
+                        yp = pl_vec[torch.as_tensor(i_t, device=device)]
+                        mk = yp >= 0
+                        if bool(mk.any()):
+                            loss_st = loss_st + w_pl * F.binary_cross_entropy_with_logits(
+                                lt[mk].float(), yp[mk] * (1 - eps) + eps / 2)
+                loss = loss_cls + loss_da + loss_st
             opt.zero_grad(set_to_none=True)
             if not torch.isfinite(loss):
                 n_skip += 1; it += 1; continue
             scaler.scale(loss).backward(); scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(all_params, cfg.grad_clip)
             scaler.step(opt); scaler.update(); sched.step()
-            acc["loss_cls"] += float(loss_cls); acc["loss_da"] += float(loss_da)
+            acc["loss_cls"] += float(loss_cls); acc["loss_da"] += float(loss_da); acc["loss_st"] += float(loss_st)
             if np.isfinite(d_acc):
                 acc["disc_acc"] += d_acc
             nb += 1; it += 1
         ep_rows.append(dict(epoch=ep + 1, it=it, lam=grl_lambda(max(0, it - 1), hp["lambda_max"]),
                             lr=opt.param_groups[0]["lr"], loss_cls=acc["loss_cls"] / max(nb, 1),
-                            loss_da=acc["loss_da"] / max(nb, 1),
-                            disc_acc=(acc["disc_acc"] / max(nb, 1)) if method in ADV_METHODS else np.nan))
+                            loss_da=acc["loss_da"] / max(nb, 1), loss_st=acc["loss_st"] / max(nb, 1),
+                            disc_acc=(acc["disc_acc"] / max(nb, 1)) if method in ADV_METHODS else np.nan,
+                            **pl_info))
 
         if (ep + 1) % cfg.eval_every == 0 or ep == cfg.epochs - 1:
             p_va, f_va = infer(model, src_va, device, want_feat=True)
@@ -804,11 +920,23 @@ def train_job(job, device, verbose=False):
             p_tu, f_tu = infer(model, i_tu, device, want_feat=True)
             _, f_su = infer(model, subsample(src_tr, cfg.dev_max, seed + ep + 1), device, want_feat=True)
             g_te = rec_probs_from(tgt_te, p_te)
+            d_eval = np.nan
+            if disc is not None:
+                # [V2] độ chính xác bộ phân biệt ở CHẾ ĐỘ EVAL (không dropout/augment), cân bằng hai miền:
+                # v1 chỉ đo trên lô huấn luyện nhiễu nên "≈ 0.5" không chứng minh được bất biến miền.
+                disc.eval()
+                with torch.no_grad():
+                    n_ = min(len(f_va), len(f_tu))
+                    hs = torch.as_tensor(f_va[:n_], device=device); ht = torch.as_tensor(f_tu[:n_], device=device)
+                    if method.startswith("cdan"):
+                        lg = lambda q: torch.logit(torch.as_tensor(q[:n_], device=device).float(), eps=1e-6)
+                        hs, ht = cdan_input(hs, lg(p_va)), cdan_input(ht, lg(p_tu))
+                    d_eval = 0.5 * float((disc(hs).float() > 0).float().mean() + (disc(ht).float() <= 0).float().mean())
             hist_rows.append(dict(
                 epoch=ep + 1, src_val_bce=float(l_va.mean()), src_val_auc=safe_auc(y_all[src_va], p_va),
                 src_val_rec_auc=safe_auc(g_va.y, g_va.p), thr_src=youden(g_va.y.values, g_va.p.values),
                 tgt_entropy=float(np.mean(frame_bce(p_tu, p_tu))) if len(p_tu) else np.nan,
-                dev=dev_risk(f_su, f_va, l_va, f_tu), pad=pad_score(f_su, f_tu, seed=ep),
+                dev=dev_risk(f_su, f_va, l_va, f_tu), pad=pad_score(f_su, f_tu, seed=ep), disc_acc_eval=d_eval,
                 # --- chỉ để GIÁM SÁT / quy tắc oracle (dùng nhãn đích) ---
                 tgt_auc_frame=safe_auc(y_all[tgt_te], p_te), tgt_auc_rec=safe_auc(g_te.y, g_te.p)))
             preds[ep + 1] = p_te.astype(np.float16)
@@ -817,8 +945,10 @@ def train_job(job, device, verbose=False):
             if verbose:
                 h = hist_rows[-1]
                 print(f"   ep{ep + 1:03d} cls {ep_rows[-1]['loss_cls']:.3f} da {ep_rows[-1]['loss_da']:.3f} "
-                      f"dacc {ep_rows[-1]['disc_acc']:.2f} | srcval auc {h['src_val_auc']:.3f} | PAD {h['pad']:.2f} "
-                      f"| [giám sát] tgt rec-AUC {h['tgt_auc_rec']:.3f}")
+                      f"st {ep_rows[-1]['loss_st']:.3f} dacc {ep_rows[-1]['disc_acc']:.2f}/eval {d_eval:.2f} | "
+                      f"srcval auc {h['src_val_auc']:.3f} | PAD {h['pad']:.2f} | [giám sát] tgt rec-AUC "
+                      f"{h['tgt_auc_rec']:.3f}" + (f" | PL acc bản ghi {pl_info['pl_acc_rec']:.2f} / frame "
+                                                    f"{pl_info['pl_acc_frame']:.2f}" if pl_info else ""))
 
     H = pd.DataFrame(hist_rows)
     el = H[H.epoch >= SELECT_FROM_EPOCH]
@@ -843,14 +973,14 @@ def train_job(job, device, verbose=False):
         torch.cuda.empty_cache()
     return res
 
-# ---- Thử nhanh một job để bắt lỗi sớm (2 epoch ngắn, không lưu) ----
+# ---- Thử nhanh một job để bắt lỗi sớm (2 epoch ngắn, không lưu): RCST đi qua gần hết các nhánh mã ----
 _save = (cfg.epochs, cfg.iters_per_epoch, cfg.eval_every)
 cfg.epochs, cfg.iters_per_epoch, cfg.eval_every = 2, 2, 1
 TOTAL_ITERS = cfg.epochs * cfg.iters_per_epoch; _sfe = SELECT_FROM_EPOCH; SELECT_FROM_EPOCH = 1
-_probe = train_job(dict(variant="probe", task=0, seed=cfg.seeds[0], fold=0, method="cdan_e"), DEVICE, verbose=True)
+_probe = train_job(dict(variant="probe", task=0, seed=cfg.seeds[0], fold=0, method="rcst"), DEVICE, verbose=True)
 cfg.epochs, cfg.iters_per_epoch, cfg.eval_every = _save
 TOTAL_ITERS = cfg.epochs * cfg.iters_per_epoch; SELECT_FROM_EPOCH = _sfe
-print(f"✓ job thử CDAN+E chạy trọn ({_probe['time_s']:.1f}s, {len(_probe['te_idx'])} frame kiểm thử).")
+print(f"✓ job thử RCST chạy trọn ({_probe['time_s']:.1f}s, {len(_probe['te_idx'])} frame kiểm thử).")
 ''')
 
 code(r'''
@@ -923,15 +1053,15 @@ def run_jobs(jobs, title=""):
     save_results()
     print(f"[{title}] xong trong {(time.time() - t0) / 60:.1f} phút")
 
-def adabn_model(state, tgt_tr, device):
-    # AdaBN (Li et al., 2018): giữ nguyên trọng số source-only, ƯỚC LƯỢNG LẠI thống kê BatchNorm
-    # bằng dữ liệu đích không nhãn (trung bình tích luỹ, không augmentation).
-    m = load_state(LeakNet().to(device), state)
-    bns = [x for x in m.modules() if isinstance(x, nn.modules.batchnorm._BatchNorm)]
-    for b in bns:
+def _bn_layers(m):
+    return [x for x in m.modules() if isinstance(x, nn.modules.batchnorm._BatchNorm)]
+
+def _reestimate_bn(m, tgt_tr, device):
+    # ước lượng lại thống kê BatchNorm bằng dữ liệu đích không nhãn (trung bình tích luỹ, không augmentation)
+    for b in _bn_layers(m):
         b.reset_running_stats(); b.momentum = None
     m.eval()
-    for b in bns:
+    for b in _bn_layers(m):
         b.train()
     with torch.no_grad():
         idx = np.random.default_rng(0).permutation(np.asarray(tgt_tr))
@@ -940,7 +1070,40 @@ def adabn_model(state, tgt_tr, device):
                 m(fetch(idx[s:s + 128], device))
     return m.eval()
 
-def run_adabn(variant="main"):
+def adabn_model(state, tgt_tr, device):
+    # AdaBN (Li et al., 2018): giữ nguyên trọng số source-only, chỉ ước lượng lại thống kê BatchNorm.
+    return _reestimate_bn(load_state(LeakNet().to(device), state), tgt_tr, device)
+
+def tent_model(state, tgt_tr, device, seed=0):
+    # [V2] TENT (Wang et al., ICLR 2021): thích ứng LÚC KIỂM THỬ, không cần dữ liệu nguồn — chỉ cập nhật tham số
+    # affine (γ, β) của BatchNorm bằng cực tiểu entropy dự đoán trên đích không nhãn (thống kê theo lô), sau đó
+    # ước lượng lại thống kê BN để suy luận tất định. Sát với triển khai: mô hình gửi đi, tự thích ứng tại điểm mới.
+    m = adabn_model(state, tgt_tr, device)
+    bns = _bn_layers(m)
+    for q in m.parameters():
+        q.requires_grad_(False)
+    params = [q for b in bns for q in (b.weight, b.bias) if q is not None]
+    for q in params:
+        q.requires_grad_(True)
+    opt = torch.optim.Adam(params, lr=cfg.tent_lr)
+    rng = np.random.default_rng(seed)
+    m.eval()
+    for b in bns:
+        b.train(); b.momentum = 0.1
+    tgt_tr = np.asarray(tgt_tr)
+    for _ in range(cfg.tent_steps):
+        xb = fetch(rng.choice(tgt_tr, min(cfg.batch_size, len(tgt_tr)), replace=False), device)
+        loss = binary_entropy(m(xb)).mean()
+        opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
+    for q in m.parameters():
+        q.requires_grad_(False)
+    return _reestimate_bn(m, tgt_tr, device)
+
+POSTHOC_BUILDERS = {"adabn": lambda st, tr, dev, sd: adabn_model(st, tr, dev),
+                    "tent": lambda st, tr, dev, sd: tent_model(st, tr, dev, sd)}
+
+def run_posthoc(variant="main", methods=None):
+    methods = [m for m in (methods or POSTHOC_METHODS) if m in cfg.methods]
     n = 0
     for T in TASKS:
         for s in cfg.seeds:
@@ -948,23 +1111,26 @@ def run_adabn(variant="main"):
             if src is None or src["state"] is None:
                 continue
             P = PARTS[(T["i"], s)]
-            for k in range(len(P["folds"])):
-                j = dict(variant=variant, task=T["i"], seed=s, fold=k, method="adabn")
-                if job_key(j) in RESULTS:
-                    continue
-                t0 = time.time()
-                tgt_tr, tgt_te = P["fold_idx"][k]
-                m = adabn_model(src["state"], tgt_tr, DEVICE)
-                p = infer(m, tgt_te, DEVICE); del m
-                RESULTS[job_key(j)] = dict(key=job_key(j), variant=variant, task=T["i"], seed=s, fold=k,
-                                           method="adabn", shots=0, hp={}, hist=None, ep_hist=None,
-                                           te_idx=np.asarray(tgt_te), sel=dict(src["sel"]),
-                                           pred={r: p for r in RULES}, thr=dict(src["thr"]),
-                                           src_val_rec_auc=dict(src["src_val_rec_auc"]),
-                                           state=None, n_skip=0, time_s=time.time() - t0, device=str(DEVICE))
-                n += 1
+            for meth in methods:
+                for k in range(len(P["folds"])):
+                    j = dict(variant=variant, task=T["i"], seed=s, fold=k, method=meth)
+                    if job_key(j) in RESULTS:
+                        continue
+                    t0 = time.time()
+                    tgt_tr, tgt_te = P["fold_idx"][k]
+                    m = POSTHOC_BUILDERS[meth](src["state"], tgt_tr, DEVICE, 1000 * s + k)
+                    p = infer(m, tgt_te, DEVICE); del m
+                    RESULTS[job_key(j)] = dict(key=job_key(j), variant=variant, task=T["i"], seed=s, fold=k,
+                                               method=meth, shots=0, hp={}, hist=None, ep_hist=None,
+                                               te_idx=np.asarray(tgt_te), sel=dict(src["sel"]),
+                                               pred={r: p for r in RULES}, thr=dict(src["thr"]),
+                                               src_val_rec_auc=dict(src["src_val_rec_auc"]),
+                                               state=None, n_skip=0, time_s=time.time() - t0, device=str(DEVICE))
+                    n += 1
     save_results()
-    print(f"AdaBN: {n} lượt ước lượng lại BatchNorm.")
+    print(f"Hậu kiểm {methods}: {n} lượt (từ mô hình source-only của từng seed).")
+
+run_adabn = lambda variant="main": run_posthoc(variant, ["adabn"])
 print("Job runner OK")
 ''')
 
@@ -982,8 +1148,8 @@ code(r'''
 # =========================================================
 # 8.1 Danh sách job + chạy / build job list and run
 # =========================================================
-TRAINED = [m for m in cfg.methods if m in ("coral", "mmd", "dann", "cdan", "cdan_e", "oracle")]
-NEED_SO = ("source_only" in cfg.methods) or ("adabn" in cfg.methods)
+TRAINED = [m for m in cfg.methods if m in ADAPT_METHODS + ("oracle", "target_only")]
+NEED_SO = ("source_only" in cfg.methods) or any(m in cfg.methods for m in POSTHOC_METHODS)
 
 def main_jobs(variant="main", methods=None, seeds=None, tasks=None, hp=None, shots=0):
     methods = TRAINED if methods is None else methods
@@ -1011,8 +1177,7 @@ MAIN_JOBS += main_jobs()
 print(f"Thí nghiệm chính: {len(MAIN_JOBS)} job huấn luyện "
       f"({len(TASKS)} bài toán × {len(cfg.seeds)} seed; phương pháp {list(cfg.methods)})")
 run_jobs(MAIN_JOBS, "main")
-if "adabn" in cfg.methods:
-    run_adabn("main")
+run_posthoc("main")
 
 if cfg.save_models:
     for r in RESULTS.values():

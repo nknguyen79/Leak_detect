@@ -19,7 +19,7 @@ def code(s):
 # 0. GIỚI THIỆU
 # =============================================================================
 md(r'''
-# Thích ứng miền đối nghịch cho nhận dạng rò rỉ ống PVC áp lực thấp bằng âm thanh — tập `tapdulieuMix_16k`
+# Thích ứng miền đối nghịch cho nhận dạng rò rỉ ống PVC áp lực thấp bằng âm thanh — tập `tapdulieuMix_16k` (v2)
 
 **Adversarial Domain Adaptation for Acoustic Leak Detection in Low-Pressure PVC Pipes across Acquisition Domains**
 
@@ -49,12 +49,28 @@ Notebook này đo mức dịch chuyển đó, rồi áp dụng **thích ứng mi
 | Mã | Phương pháp | Dùng dữ liệu đích | Vai trò |
 |---|---|---|---|
 | `source_only` | Huấn luyện chỉ trên miền nguồn | không | **cận dưới** |
+| `joint_bn` | Lô trộn nguồn + đích qua BatchNorm, **không** hàm căn chỉnh | không nhãn | **đối chứng cơ chế** (v2) |
 | `adabn` | Source-only + ước lượng lại BatchNorm trên đích (Li et al., 2018) | không nhãn | baseline không huấn luyện |
+| `tent` | Thích ứng lúc kiểm thử: cực tiểu entropy trên tham số BN (Wang et al., 2021) | không nhãn | baseline không cần nguồn (v2) |
 | `coral` | Deep CORAL — khớp hiệp phương sai (Sun & Saenko, 2016) | không nhãn | baseline không đối nghịch |
 | `mmd` *(tuỳ chọn)* | DAN — MK-MMD (Long et al., 2015) | không nhãn | baseline không đối nghịch |
-| **`dann`** | **DANN — Gradient Reversal Layer** (Ganin et al., 2016) | không nhãn | **phương pháp chính** |
-| **`cdan_e`** | **CDAN+E — đối nghịch có điều kiện + trọng số entropy** (Long et al., 2018) | không nhãn | **biến thể đối nghịch có điều kiện** |
-| `oracle` | Nguồn + đích **có nhãn** (giám sát đầy đủ) | có nhãn | **cận trên tham chiếu** |
+| `mcc` | Minimum Class Confusion (Jin et al., 2020) | không nhãn | baseline hiện đại (v2) |
+| **`dann`** | **DANN — Gradient Reversal Layer** (Ganin et al., 2016) | không nhãn | phương pháp đối nghịch chuẩn |
+| **`cdan_e`** | **CDAN+E — đối nghịch có điều kiện + trọng số entropy** (Long et al., 2018) | không nhãn | biến thể đối nghịch có điều kiện |
+| **`rcst`** | **DANN + tự huấn luyện nhất quán mức bản ghi** (nhãn giả theo bản ghi + phạt không nhất quán trong bản ghi) | không nhãn | **phương pháp đề xuất** (v2) |
+| `oracle` | Nguồn + đích **có nhãn** (giám sát đầy đủ) | có nhãn | cận trên tham chiếu |
+| `target_only` | Chỉ đích **có nhãn** (cùng fold) | có nhãn | cận trên tham chiếu thứ hai (v2) |
+
+### Điểm mới của v2 (sửa theo phản biện lần chạy v1 — `docs/DANH_GIA_KET_QUA_ADA_v1.md`)
+
+| Mã | Vấn đề ở v1 | Thay đổi ở v2 |
+|---|---|---|
+| **V1** | 165 tệp `Sxx_*` bị coi là 165 bản ghi độc lập → AUC nguồn-val = 1.000 ở mọi job nguồn S, oracle S = 1.000 | Mã bản ghi `[RS]xx` **ghép miền và lớp** (`S01_leak01` + `S01_leak02` = một bản ghi; `S01_leak` ≠ `S01_noleak`) |
+| **V2** | Dải < 90 Hz và > 3 kHz phân biệt hoàn hảo trong S nhưng không chuyển sang R | Mục 3.9: bảng **khả năng chuyển giao theo dải** (trong miền vs chéo miền) |
+| **V3** | Chuỗi R cắt thông cao < 100 Hz, chuỗi S không; quy tắc hoà hợp chỉ xét phía cao | Hoà hợp **hai phía** từ PSD trung bình đã căn mức (không dùng nhãn) + **ngẫu nhiên hoá chuỗi thu** khi huấn luyện |
+| **V4** | Bộ phân biệt ở mức may rủi từ epoch 1, PAD không giảm, quét λ phẳng → lợi ích có thể do BatchNorm | Đối chứng **Joint-BN (λ=0)**, bảng **phân rã cơ chế** (mục 9.2b); bộ phân biệt theo bản gốc (1024, lr ×10) và đo độ chính xác **ở chế độ eval** |
+| **V5** | Ablation 1 seed; p ghi "0.000"; Holm gộp cả cận trên | Ablation 3 seed; p ghi "< 1/B"; Holm chỉ trên các phương pháp UDA |
+| **M** | Chỉ các baseline 2015–2018 | Thêm **MCC**, **TENT**, **target-only** và phương pháp đề xuất **RCST** |
 
 ### Giao thức đánh giá (tóm tắt)
 
@@ -213,7 +229,12 @@ class CFG:
     noleak_keys: tuple = ("noleak", "no_leak", "non_leak", "nonleak", "normal",
                           "background", "khong_ro_ri", "khongroli", "no-leak")
     audio_ext: tuple = (".wav", ".flac", ".ogg", ".mp3", ".WAV")
-    record_regex: str = r"(R\d{1,4})"          # mã bản ghi trong tên tệp
+    # [V2] Mã bản ghi: Rxxx (hiện trường) và Sxx (mô hình thí nghiệm). Chuỗi S ĐÁNH SỐ LẠI TRONG MỖI LỚP
+    #      (S01_leak và S01_noleak là hai lần thu khác nhau, ở hai điểm đo khác nhau) nên mã bản ghi được
+    #      GHÉP THÊM LỚP: S01_leak01 + S01_leak02 = một bản ghi "S01|leak". v1 coi mỗi tệp S là một bản ghi
+    #      -> rò rỉ giữa các tệp cùng lần thu (AUC nguồn-val = 1.000 ở mọi job nguồn S).
+    record_regex: str = r"([RS]\d{1,4})"
+    record_id_by_class: bool = True
     strict_checks: bool = True                 # dừng khi có mâu thuẫn nhãn
 
     # ---- MIỀN / Domains ------------------------------------------------------
@@ -230,10 +251,12 @@ class CFG:
     #   regex        : domain_regex trên đường dẫn tương đối | csv: bảng gán miền (cột domain + rel/file/file_stem/record_id)
     domain_source: str = "auto"
     domain_depth: int = 1                      # số cấp thư mục ghép thành tên miền (cách "folder")
-    domain_regex: str = ""                     # ví dụ r"(?:^|/)(ptn|tt)_" trên đường dẫn tương đối (nhóm 1 = miền)
+    # [V2] tapdulieuMix_16k: miền = tiền tố mã bản ghi (R = hiện trường, S = mô hình thí nghiệm)
+    domain_regex: str = r"(?:^|/)([RS])\d+_"   # trên đường dẫn tương đối (nhóm 1 = miền); "" -> chỉ tự dò
     domain_regex_group: int = 1
     domain_csv: str = ""
-    domain_alias: dict = field(default_factory=dict)   # gộp/đổi tên miền, ví dụ {"ptn": "lab", "unnamed": "field"}
+    domain_alias: dict = field(default_factory=lambda: {"R": "R_field", "r": "R_field",
+                                                        "S": "S_lab", "s": "S_lab"})   # đổi tên miền
     exclude_domains: tuple = ()
     min_records_per_class: int = 2             # miền cần >= ngần này bản ghi MỖI lớp để làm đích
     max_auto_domains: int = 6                  # cách tự dò cho > ngần này miền bị coi là không hợp lệ
@@ -255,10 +278,13 @@ class CFG:
     notch_q: float = 30.0
     frame_sec: float = 2.0
     hop_sec: float = 1.0
-    # [P] Hoà hợp băng thông: nếu một miền có băng thông hiệu dụng thấp (ví dụ thu 8 kHz rồi nâng
-    #     lên 16 kHz), mọi front-end phổ bị giới hạn về băng thông CHUNG -> loại một dấu hiệu "miền"
-    #     tầm thường (năng lượng > 4 kHz). "auto" | "off" | số Hz.
+    # [P][V2] Hoà hợp băng thông HAI PHÍA: so PSD trung bình (đã căn mức ở 300-1500 Hz) giữa các miền;
+    #     dải thấp/cao nơi hai miền lệch nhau > harmonise_tol_db chỉ phản ánh CHUỖI THU (v1: chuỗi R cắt
+    #     thông cao < 100 Hz, chuỗi S thì không) -> mọi front-end phổ giới hạn về dải CHUNG.
+    #     "auto" | "off" | (f_min, f_max) cố định. Quy tắc không dùng nhãn.
     bandwidth_harmonize: str = "auto"
+    harmonise_tol_db: float = 6.0
+    f_min_cap: float = 300.0                   # không bao giờ cắt quá 300 Hz (dải rò rỉ PVC bắt đầu ~300 Hz)
     bw_energy_frac: float = 0.995
     check_duplicates: bool = True              # dò bản ghi trùng nội dung giữa/trong các miền
 
@@ -275,15 +301,35 @@ class CFG:
     backbone: str = "cnn2d"                    # cnn2d (log-Mel, như LeakCNN2D v7) | cnn1d (dạng sóng)
     widths: tuple = (32, 64, 128, 256)
     bottleneck_dim: int = 256
-    disc_hidden: int = 256
+    # [V2] Bộ phân biệt miền theo bản cài đặt gốc của DANN/CDAN (rộng 1024, lr x10). v1 dùng 256 / x1 và bộ
+    #      phân biệt ở mức may rủi ngay từ epoch 1 trong khi đặc trưng vẫn tách miền (PAD 1.92) -> quá yếu.
+    disc_hidden: int = 1024
     disc_dropout: float = 0.5
 
     # ---- Phương pháp / Methods ----------------------------------------------
-    methods: tuple = ("source_only", "adabn", "coral", "dann", "cdan_e", "oracle")
+    # [V2] joint_bn = đối chứng CƠ CHẾ (lô trộn nguồn+đích qua BatchNorm, KHÔNG có hàm căn chỉnh);
+    #      tent = thích ứng lúc kiểm thử (Wang et al., 2021); mcc = Minimum Class Confusion (Jin et al., 2020);
+    #      rcst = PHƯƠNG PHÁP ĐỀ XUẤT (DANN + tự huấn luyện nhất quán mức bản ghi); target_only = cận trên thứ hai.
+    methods: tuple = ("source_only", "joint_bn", "adabn", "tent", "coral", "mcc", "dann", "cdan_e", "rcst",
+                      "oracle", "target_only")
     lambda_max: float = 1.0                    # [P] hệ số GRL cuối lịch (DANN/CDAN)
     lambda_gamma: float = 10.0
     coral_weight: float = 1.0
     mmd_weight: float = 1.0
+    mcc_weight: float = 1.0
+    mcc_temp: float = 2.5
+    tent_steps: int = 200
+    tent_lr: float = 1e-3
+    # ---- [V2] RCST: tự huấn luyện nhất quán mức bản ghi (Record-Consistent Self-Training) ----------
+    #   * mọi frame của một bản ghi đích chung MỘT nhãn -> nhãn giả lấy từ TRUNG BÌNH xác suất của bản ghi,
+    #     chọn cân bằng theo thứ hạng (top/bottom) với tỉ lệ tăng dần rcst_sel (đầu, cuối);
+    #   * hàm phạt nhất quán: phương sai xác suất giữa các frame của cùng bản ghi trong lô;
+    #   * lô đích gồm rcst_bag = (số bản ghi, số frame mỗi bản ghi); chỉ dùng bản ghi tgt_train (quy nạp).
+    rcst_start_frac: float = 0.3
+    rcst_sel: tuple = (0.2, 0.6)
+    rcst_pl_weight: float = 1.0
+    rcst_cons_weight: float = 1.0
+    rcst_bag: tuple = (8, 8)
 
     # ---- Giao thức / Protocol -----------------------------------------------
     target_protocol: str = "inductive"         # [P] inductive (K-fold bản ghi đích) | transductive
@@ -292,11 +338,11 @@ class CFG:
     seeds: tuple = (42, 43, 44)                # CV lặp: mỗi seed = phân hoạch mới + khởi tạo mới
 
     # ---- Huấn luyện / Training ----------------------------------------------
-    epochs: int = 30
+    epochs: int = 20                           # [V2] v1: 30; AUC đích ổn định từ epoch ~15-20 (Hình 16 v1)
     iters_per_epoch: int = 80                  # "epoch" = số vòng lặp cố định (chuẩn của DANN)
     batch_size: int = 64                       # MỖI miền trong một vòng lặp
     lr: float = 3e-4
-    disc_lr_mult: float = 1.0
+    disc_lr_mult: float = 10.0                 # [V2] như bản gốc DANN/CDAN
     weight_decay: float = 1e-4
     warmup_frac: float = 0.05
     label_smoothing: float = 0.05
@@ -309,6 +355,12 @@ class CFG:
     aug_fir_p: float = 0.5                     # đáp ứng kênh ngẫu nhiên (bất biến cảm biến)
     aug_fir_taps: int = 48
     aug_shift_p: float = 0.5
+    # [V2] NGẪU NHIÊN HOÁ CHUỖI THU (có cơ sở vật lý): thông cao ngẫu nhiên (mô phỏng cảm biến/máy ghi cắt
+    #      tần thấp khác nhau), độ dốc phổ ngẫu nhiên, thông thấp ngẫu nhiên — áp trong miền tần số, theo mẫu.
+    aug_chain_p: float = 0.5
+    aug_hp_hz: tuple = (20.0, 200.0)
+    aug_tilt_db_oct: tuple = (-3.0, 3.0)
+    aug_lp_hz: tuple = (3500.0, 8000.0)
     eval_every: int = 2                        # đánh giá mỗi ngần này epoch
     select_rule: str = "last"                  # [P] last | src_val | dev   (oracle chỉ để đo lạc quan)
     select_from_frac: float = 0.3              # không chọn checkpoint trước 30% lịch (λ còn nhỏ)
@@ -323,7 +375,11 @@ class CFG:
     run_lambda_sweep: bool = True
     lambda_grid: tuple = (0.1, 0.3, 3.0)       # cộng với lambda_max của lần chạy chính
     run_ablation: bool = True
-    ablation_variants: tuple = ("no_fir", "no_aug", "no_balance", "cdan_noent")
+    # [V2] weak_disc = bộ phân biệt của v1 (256, lr x1); no_chain_aug = RCST không ngẫu nhiên hoá chuỗi thu;
+    #      rcst_no_pl / rcst_no_cons = bỏ từng thành phần của RCST; so_chain_aug = source-only không chain-aug.
+    ablation_variants: tuple = ("weak_disc", "no_chain_aug", "rcst_no_pl", "rcst_no_cons", "so_no_chain_aug")
+    ablation_seeds: tuple = (42, 43, 44)       # [V2] v1 chỉ 1 seed -> kết luận ablation mong manh
+    run_shortcut_check: bool = True            # [V2] mục 3.9: dải nào phân biệt TRONG miền / chuyển giao được
     sweep_seeds: tuple = (42,)
     sweep_task: int = 0
     run_ssda: bool = False                     # đường cong bán giám sát (tốn thêm thời gian)
@@ -357,8 +413,10 @@ if cfg.smoke_test:
     print("!! SMOKE TEST: vài vòng lặp, 2 fold, 1 seed — chỉ để kiểm tra toàn tuyến.")
     cfg.epochs, cfg.iters_per_epoch, cfg.batch_size, cfg.eval_every = 4, 4, 16, 1
     cfg.tgt_folds, cfg.seeds, cfg.bootstrap_n = 2, (42,), 100
-    cfg.methods = ("source_only", "adabn", "coral", "mmd", "dann", "cdan_e", "oracle")
-    cfg.lambda_grid, cfg.ablation_variants = (0.3,), ("no_fir", "cdan_noent")
+    cfg.methods = ("source_only", "joint_bn", "adabn", "tent", "coral", "mmd", "mcc", "dann", "cdan_e", "rcst",
+                   "oracle", "target_only")
+    cfg.lambda_grid, cfg.ablation_variants = (0.3,), ("weak_disc", "rcst_no_pl")
+    cfg.ablation_seeds, cfg.tent_steps, cfg.rcst_bag = (42,), 5, (4, 4)
     cfg.run_ssda, cfg.ssda_shots = True, (1,)
     cfg.tsne_max_points, cfg.dev_max = 300, 200
 
@@ -413,15 +471,19 @@ plt.rcParams.update({
 PAL = {"leak": "#C8553D", "noleak": "#2E6F95", "grey": "#6E7B8B", "warn": "#E0A458",
        "src": "#2E6F95", "tgt": "#C8553D", "ok": "#3F7D20"}
 DOMAIN_PALETTE = ["#2E6F95", "#C8553D", "#3F7D20", "#8C6BB1", "#E0A458", "#4C9F9F", "#A0522D"]
-METHOD_LABEL = {"source_only": "Source-only", "adabn": "AdaBN", "coral": "Deep CORAL",
-                "mmd": "DAN (MK-MMD)", "dann": "DANN", "cdan": "CDAN", "cdan_e": "CDAN+E",
-                "oracle": "Oracle (S+T labelled)", "oracle_shots": "Source + few target labels",
+METHOD_LABEL = {"source_only": "Source-only", "joint_bn": "Joint-BN (λ=0)", "adabn": "AdaBN", "tent": "TENT",
+                "coral": "Deep CORAL", "mmd": "DAN (MK-MMD)", "mcc": "MCC", "dann": "DANN", "cdan": "CDAN",
+                "cdan_e": "CDAN+E", "rcst": "RCST (ours)", "oracle": "Oracle (S+T labelled)",
+                "target_only": "Target-only (labelled)", "oracle_shots": "Source + few target labels",
                 "dann_shots": "DANN + few target labels"}
-METHOD_COLOR = {"source_only": "#6E7B8B", "adabn": "#4C9F9F", "coral": "#8C6BB1", "mmd": "#A0522D",
-                "dann": "#2E6F95", "cdan": "#E0A458", "cdan_e": "#C8553D", "oracle": "#3F7D20",
+METHOD_COLOR = {"source_only": "#6E7B8B", "joint_bn": "#9AA5B1", "adabn": "#4C9F9F", "tent": "#2A9D8F",
+                "coral": "#8C6BB1", "mmd": "#A0522D", "mcc": "#B5838D", "dann": "#2E6F95", "cdan": "#E0A458",
+                "cdan_e": "#C8553D", "rcst": "#D62828", "oracle": "#3F7D20", "target_only": "#6A994E",
                 "oracle_shots": "#3F7D20", "dann_shots": "#2E6F95"}
-ADAPT_METHODS = ("coral", "mmd", "dann", "cdan", "cdan_e")      # dùng đích không nhãn khi huấn luyện
-ADV_METHODS = ("dann", "cdan", "cdan_e")                        # có bộ phân biệt miền + GRL
+# dùng đích không nhãn khi huấn luyện (lô trộn nguồn + đích qua cùng một lượt truyền)
+ADAPT_METHODS = ("joint_bn", "coral", "mmd", "mcc", "dann", "cdan", "cdan_e", "rcst")
+ADV_METHODS = ("dann", "cdan", "cdan_e", "rcst")                # có bộ phân biệt miền + GRL
+POSTHOC_METHODS = ("adabn", "tent")                             # dựng từ mô hình source-only, không huấn luyện lại
 
 def mlabel(m):
     return METHOD_LABEL.get(m, m)
@@ -689,6 +751,9 @@ def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0, l
             d, name = root / cls, f"{dom}_{name}"
         elif layout == "bandwidth":
             d = root / cls
+        elif layout == "mixrs":                                         # như tapdulieuMix_16k: leak/, noleak/ phẳng
+            d = root / cls
+            name = (f"S{rid:02d}_{cls}{seg:02d}.wav" if dom == "lab" else f"R{rid:03d}_{cls}{seg:02d}.wav")
         else:                                                           # folder, roots
             d = root / dom / cls
         d.mkdir(parents=True, exist_ok=True)
@@ -698,6 +763,8 @@ def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0, l
         P = prof[dom]
         rid = 100 * di if layout == "bandwidth" else 0                  # thư mục phẳng: tránh trùng tên tệp
         for cls, n_r in (("leak", n_leak), ("noleak", n_no)):
+            if layout == "mixrs" and dom == "lab":
+                rid = 0                                                 # chuỗi S đánh số lại trong mỗi lớp
             for _ in range(n_r):
                 rid += 1
                 f0 = rng.uniform(*P["f0"]); bw = rng.uniform(*P["bw"])
@@ -728,6 +795,7 @@ if SYNTHETIC:
     # LEAK_SYN_LAYOUT chọn bố cục thư mục mô phỏng để kiểm thử bộ nhận miền:
     #   folder (mặc định) <miền>/<lớp>/ | labelfolder <lớp>_<miền>/ | filename <lớp>/<miền>_Rxxx...
     #   bandwidth <lớp>/ phẳng, miền chỉ khác chuỗi thu | roots: mỗi miền một thư mục gốc | single: 1 miền
+    #   mixrs: như tapdulieuMix_16k (<lớp>/Rxxx_* hiện trường + <lớp>/Sxx_* thí nghiệm, Sxx đánh số lại theo lớp)
     _layout = os.environ.get("LEAK_SYN_LAYOUT", "folder")
     _n = (5, 4) if cfg.smoke_test else (14, 10)
     _spec = ((("lab",) + _n),) if _layout == "single" else (("lab",) + _n, ("field",) + _n[::-1])
@@ -921,7 +989,8 @@ files = files[files.domain != ""].copy()
 files["domain"] = files.domain.map(lambda d: cfg.domain_alias.get(d, d))
 if cfg.exclude_domains:
     files = files[~files.domain.isin(cfg.exclude_domains)]
-files["record_uid"] = files.domain + "|" + files.record_id
+# [V2] ghép LỚP vào mã bản ghi khi chuỗi đánh số lại trong mỗi lớp (S01_leak ≠ S01_noleak)
+files["record_uid"] = files.domain + "|" + files.record_id + (("|" + files.cls) if cfg.record_id_by_class else "")
 files = files.sort_values(["domain", "cls", "record_uid", "file_stem"]).reset_index(drop=True)
 files["file_id"] = np.arange(len(files))
 files.to_csv(OUT / "manifest_files.csv", index=False)
@@ -988,6 +1057,16 @@ n_fb = int((files.rid_source == "fallback:stem").sum())
 if n_fb:
     print(f"!! {n_fb} tệp không khớp regex '{cfg.record_regex}' -> lấy tên tệp làm mã bản ghi "
           f"(mỗi tệp thành một bản ghi; kiểm tra lại nếu một lần thu bị cắt thành nhiều tệp).")
+
+# [V2] Mã bản ghi xuất hiện ở CẢ HAI LỚP trong cùng miền: với cfg.record_id_by_class=True đây là các lần thu
+#      khác nhau (chuỗi S đánh số lại trong mỗi lớp); với False thì là mâu thuẫn nhãn (đã bắt ở trên).
+_both = files.groupby(["domain", "record_id"]).cls.nunique()
+_both = _both[_both > 1]
+if len(_both):
+    print(f"Mã bản ghi có ở cả leak và noleak: {len(_both)} (ví dụ {[f'{d}:{r}' for d, r in _both.index[:5]]})"
+          + (" -> tách thành hai bản ghi theo lớp (cfg.record_id_by_class=True)." if cfg.record_id_by_class else ""))
+_tpr = files.groupby("domain").agg(n_rec=("record_uid", "nunique"), n_files=("path", "size"))
+print("Bản ghi / tệp theo miền:", {d: f"{int(r.n_rec)} / {int(r.n_files)}" for d, r in _tpr.iterrows()})
 
 # Mã Rxxx trùng giữa các miền: hợp lệ (đã tách bằng record_uid) nhưng phải nêu ra.
 _shared = files.groupby("record_id").domain.nunique()
@@ -1197,23 +1276,50 @@ save_table(bw_tab, "bandwidth_by_domain",
            "signal energy lies; median over recordings) and median energy fraction above 4 kHz.", 3)
 
 NYQ = cfg.target_sr / 2
-F_MAX_EFF = float(min(cfg.f_max, NYQ))
-HARMONISED = False
-if cfg.bandwidth_harmonize == "auto":
-    common = float(bw_tab.bw_p90_hz.min())
-    if common < 0.85 * NYQ and bw_tab.bw_p90_hz.max() > 1.15 * common:
-        F_MAX_EFF = float(max(1000.0, math.floor(common / 100) * 100)); HARMONISED = True
-elif cfg.bandwidth_harmonize not in ("off", "", None):
-    F_MAX_EFF = float(cfg.bandwidth_harmonize); HARMONISED = True
-if HARMONISED:
-    print(f"[P] HOÀ HỢP BĂNG THÔNG: mọi front-end phổ giới hạn ở 0-{F_MAX_EFF:.0f} Hz "
-          f"(miền hẹp nhất có p90 băng thông {bw_tab.bw_p90_hz.min():.0f} Hz).")
-    print("    Lý do: năng lượng trên dải này chỉ phản ánh CHUỖI THU của từng miền -> một dấu hiệu miền")
-    print("    tầm thường mà bộ phân biệt miền sẽ khai thác. Viết rõ trong phần Methods.")
-else:
-    print(f"Băng thông các miền tương đương -> giữ f_max = {F_MAX_EFF:.0f} Hz.")
+# ---- [V2] Hoà hợp HAI PHÍA: PSD trung bình mỗi miền (mọi bản ghi, cả hai lớp -> KHÔNG dùng nhãn), căn mức
+#      ở 300-1500 Hz; dải thấp (< f_min_cap) và dải cao (> 2 kHz) nơi các miền lệch nhau > harmonise_tol_db
+#      chỉ phản ánh chuỗi thu (cảm biến, bộ lọc của máy ghi, bộ lọc tái lấy mẫu) -> bị loại khỏi front-end.
+_gc = np.geomspace(20.0, NYQ * 0.99, 96)
+def _dom_curve(d):
+    L = []
+    for u, g in files[files.domain == d].groupby("record_uid"):
+        P = np.mean([FILE_STATS[i]["psd"] for i in g.file_id], axis=0)
+        L.append(10 * np.log10(np.interp(_gc, PSD_F, P) + 1e-30))
+    c = np.mean(L, axis=0)
+    return c - np.median(c[(_gc >= 300) & (_gc <= 1500)])
+CURVES = {d: _dom_curve(d) for d in DOMAINS_ALL}
+MISMATCH = np.zeros_like(_gc)
+for _i, _a in enumerate(DOMAINS_ALL):
+    for _b in DOMAINS_ALL[_i + 1:]:
+        MISMATCH = np.maximum(MISMATCH, np.abs(CURVES[_a] - CURVES[_b]))
+MISMATCH = pd.Series(MISMATCH).rolling(3, center=True, min_periods=1).median().values
 
-fig, ax = plt.subplots(1, 2, figsize=(12, 3.6))
+F_MIN_EFF, F_MAX_EFF = float(max(cfg.f_min, 20.0)), float(min(cfg.f_max, NYQ))
+if cfg.bandwidth_harmonize == "auto" and len(DOMAINS_ALL) >= 2:
+    lo = np.where((_gc <= cfg.f_min_cap) & (MISMATCH > cfg.harmonise_tol_db))[0]
+    if len(lo):
+        F_MIN_EFF = float(max(F_MIN_EFF, min(cfg.f_min_cap, 5 * math.ceil(_gc[min(lo.max() + 1, len(_gc) - 1)] / 5))))
+    hi = np.where((_gc >= 2000) & (MISMATCH > cfg.harmonise_tol_db))[0]
+    if len(hi):
+        F_MAX_EFF = float(min(F_MAX_EFF, 100 * math.floor(_gc[max(hi.min() - 1, 0)] / 100)))
+    common = float(bw_tab.bw_p90_hz.min())            # quy tắc v1: chuỗi thu 8 kHz (năng lượng 99.5%)
+    if common < 0.85 * NYQ and bw_tab.bw_p90_hz.max() > 1.15 * common:
+        F_MAX_EFF = float(min(F_MAX_EFF, max(1000.0, math.floor(common / 100) * 100)))
+elif isinstance(cfg.bandwidth_harmonize, (tuple, list)):
+    F_MIN_EFF, F_MAX_EFF = map(float, cfg.bandwidth_harmonize)
+HARMONISED = bool(F_MIN_EFF > max(cfg.f_min, 20.0) + 1e-6 or F_MAX_EFF < min(cfg.f_max, NYQ) - 1e-6)
+if HARMONISED:
+    print(f"[P] HOÀ HỢP CHUỖI THU: mọi front-end phổ dùng dải chung {F_MIN_EFF:.0f}-{F_MAX_EFF:.0f} Hz "
+          f"(ngưỡng lệch {cfg.harmonise_tol_db:g} dB giữa PSD đã căn mức của các miền).")
+    print("    Lý do: ngoài dải này phổ hai miền khác nhau do CHUỖI THU, không do rò rỉ -> dấu hiệu miền tầm")
+    print("    thường và lối tắt tiềm năng. Viết rõ trong phần Methods.")
+    if F_MIN_EFF >= cfg.f_min_cap - 1e-6:
+        print(f"!! f_min chạm trần {cfg.f_min_cap:g} Hz: lệch phổ còn lớn ở dải thấp — xem Hình (d).")
+else:
+    print(f"Phổ các miền tương đương -> giữ {F_MIN_EFF:.0f}-{F_MAX_EFF:.0f} Hz.")
+
+fig, ax = plt.subplots(2, 2, figsize=(13, 7))
+ax = ax.ravel()
 for i, d in enumerate(DOMAINS_ALL):
     v = rec_bw.loc[rec_bw.domain == d, "bw_hz"].values
     ax[0].scatter(np.full(len(v), i) + np.random.default_rng(i).uniform(-.15, .15, len(v)), v,
@@ -1228,9 +1334,22 @@ for d in DOMAINS_ALL:
     ax[1].hist(np.log10(v + 1e-9), bins=20, alpha=.55, color=DOMAIN_COLOR[d], label=d)
 ax[1].set_xlabel("log10(energy fraction above 4 kHz)"); ax[1].set_title("(b) High-frequency energy")
 ax[1].legend()
+for d in DOMAINS_ALL:
+    ax[2].semilogx(_gc, CURVES[d], color=DOMAIN_COLOR[d], lw=1.5, label=d)
+ax[3].semilogx(_gc, MISMATCH, color="k", lw=1.4)
+ax[3].axhline(cfg.harmonise_tol_db, color=PAL["warn"], ls="--", label=f"tolerance {cfg.harmonise_tol_db:g} dB")
+for a_ in (ax[2], ax[3]):
+    a_.axvspan(20, F_MIN_EFF, color="#BBBBBB", alpha=.35)
+    a_.axvspan(F_MAX_EFF, NYQ, color="#BBBBBB", alpha=.35)
+    a_.set_xlabel("frequency (Hz)")
+ax[2].set_ylabel("PSD aligned at 0.3–1.5 kHz (dB)"); ax[2].set_title("(c) Domain-average spectra (labels not used)")
+ax[2].legend()
+ax[3].set_ylabel("max |difference| between domains (dB)")
+ax[3].set_title(f"(d) Acquisition-chain mismatch → common band {F_MIN_EFF:.0f}–{F_MAX_EFF:.0f} Hz"); ax[3].legend()
 savefig(fig, "bandwidth_by_domain",
-        "Acquisition-chain fingerprint: (a) effective bandwidth of every recording by domain with the "
-        "harmonised front-end limit; (b) distribution of the energy fraction above 4 kHz.")
+        "Acquisition-chain fingerprint and harmonisation: (a) effective bandwidth of every recording, (b) energy above "
+        "4 kHz, (c) domain-average spectra aligned at 0.3–1.5 kHz (class labels not used) and (d) their maximum "
+        "difference; grey bands are excluded from every spectral front-end.")
 ''')
 
 code(r'''
@@ -1241,10 +1360,10 @@ def record_psd_table():
     rows = {}
     for uid, g in files.groupby("record_uid"):
         P = np.mean([FILE_STATS[i]["psd"] for i in g.file_id], axis=0)
-        rows[uid] = P / (P[(PSD_F >= cfg.f_min) & (PSD_F <= F_MAX_EFF)].sum() + 1e-30)   # chuẩn hoá: bất biến gain
+        rows[uid] = P / (P[(PSD_F >= F_MIN_EFF) & (PSD_F <= F_MAX_EFF)].sum() + 1e-30)   # chuẩn hoá: bất biến gain
     return rows
 REC_PSD = record_psd_table()
-_band = (PSD_F >= cfg.f_min) & (PSD_F <= F_MAX_EFF)
+_band = (PSD_F >= 20) & (PSD_F <= NYQ)                 # vẽ toàn dải, tô xám phần bị loại
 
 fig, axes = plt.subplots(1, len(DOMAINS_ALL) + 1, figsize=(4.2 * (len(DOMAINS_ALL) + 1), 3.6), sharey=True)
 for ax, d in zip(axes, DOMAINS_ALL):
@@ -1267,6 +1386,8 @@ for d in DOMAINS_ALL:
             L = 10 * np.log10(np.stack([REC_PSD[u] for u in uids])[:, _band] + 1e-20)
             ax.semilogx(PSD_F[_band], L.mean(0), color=DOMAIN_COLOR[d], ls=ls, lw=1.2, label=f"{d}/{c}")
 ax.set_title("all domains overlaid"); ax.set_xlabel("frequency (Hz)"); ax.legend(fontsize=7)
+for a_ in axes:
+    a_.axvspan(20, F_MIN_EFF, color="#BBBBBB", alpha=.3); a_.axvspan(F_MAX_EFF, NYQ, color="#BBBBBB", alpha=.3)
 savefig(fig, "psd_domain_class",
         "Record-level relative power spectral density (Welch) per domain and class (mean ± 95% CI over "
         "recordings). The right panel overlays domains: vertical offsets between domains of the same class "
@@ -1278,7 +1399,7 @@ code(r'''
 # 3.4-3.5 Năng lượng theo dải + AUC TRONG TỪNG MIỀN + kiểm tra CHIỀU dấu hiệu
 #         Band energies, within-domain band AUC and cue-direction consistency (conditional-shift check)
 # =========================================================
-_edges = np.unique(np.round(np.geomspace(max(cfg.f_min, 20), F_MAX_EFF, 13)).astype(int))
+_edges = np.unique(np.round(np.geomspace(20, NYQ, 13)).astype(int))     # toàn dải: thấy cả dải bị loại
 BANDS = [(int(a), int(b)) for a, b in zip(_edges[:-1], _edges[1:])]
 
 def band_energy(P):
@@ -1317,7 +1438,9 @@ for col in A.columns:
     v = A[col].values - .5; sg = S[col].values
     flip = bool(((v > 0) & sg).any() and ((v < 0) & sg).any())
     same = bool(np.all(v > 0) or np.all(v < 0))
-    cons.append(dict(band_hz=col, **{f"AUC_{d}": A.loc[d, col] for d in A.index},
+    _lo, _hi = map(float, col.split("-"))
+    cons.append(dict(band_hz=col, in_frontend=bool(_lo >= F_MIN_EFF - 1 and _hi <= F_MAX_EFF + 1),
+                     **{f"AUC_{d}": A.loc[d, col] for d in A.index},
                      direction=("FLIP (significant)" if flip else ("consistent" if same else "mixed"))))
 cons_df = pd.DataFrame(cons)
 save_table(cons_df, "band_auc_within_domain",
@@ -1402,7 +1525,7 @@ code(r'''
 # =========================================================
 _mel_cpu = torchaudio.transforms.MelSpectrogram(sample_rate=cfg.target_sr, n_fft=cfg.n_fft,
                                                 hop_length=cfg.hop_length, n_mels=cfg.n_mels,
-                                                f_min=cfg.f_min, f_max=F_MAX_EFF, power=2.0)
+                                                f_min=F_MIN_EFF, f_max=F_MAX_EFF, power=2.0)
 _mel_dev = copy.deepcopy(_mel_cpu).to(DEVICE)          # .to() của nn.Module là tại chỗ -> phải sao chép
 
 def logmel_stats(idx, bs=512):
@@ -1526,8 +1649,85 @@ for j, d in enumerate(DOMAINS_ALL):
         ax.set_title(f"{d} / {c}  ({frames.record_uid[k]})", fontsize=9); ax.grid(False)
         ax.set_xlabel("time (s)"); ax.set_ylabel("mel band")
 savefig(fig, "spectrogram_examples",
-        f"Representative log-Mel spectrograms (0–{F_MAX_EFF:.0f} Hz, {cfg.n_mels} bands) of one random frame "
+        f"Representative log-Mel spectrograms ({F_MIN_EFF:.0f}–{F_MAX_EFF:.0f} Hz, {cfg.n_mels} bands) of one random frame "
         "per domain and class.")
+''')
+
+code(r'''
+# =========================================================
+# 3.9 [V2] KIỂM TRA LỐI TẮT: dải nào phân biệt TRONG miền, dải nào CHUYỂN GIAO được?
+#     Within-domain vs cross-domain informativeness of each frequency region (no deep network, no target tuning).
+#     Một vùng tần số phân biệt rất tốt TRONG một miền nhưng không chuyển sang miền kia là ĐẶC THÙ MIỀN
+#     (đáp ứng thủy lực của mô hình thí nghiệm, bơm, chuỗi thu) chứ không phải chữ ký rò rỉ.
+#     Đặc trưng: năng lượng log theo dải 1/3 octave, trừ trung bình của chính bản ghi (bất biến gain), mức BẢN GHI.
+# =========================================================
+SHORTCUT = pd.DataFrame()
+if cfg.run_shortcut_check:
+    _fc = 1000 * 2 ** (np.arange(-16, 10) / 3)                       # 25 Hz ... 6.3 kHz
+    _fc = _fc[(_fc >= 25) & (_fc * 2 ** (1 / 6) <= NYQ)]
+    def _third_oct(P):
+        return np.array([P[(PSD_F >= f / 2 ** (1 / 6)) & (PSD_F < f * 2 ** (1 / 6))].sum() for f in _fc])
+    TOB = {}
+    for u, g in files.groupby("record_uid"):
+        P = np.mean([FILE_STATS[i]["psd"] for i in g.file_id], axis=0)
+        L = 10 * np.log10(_third_oct(P) + 1e-30)
+        TOB[u] = L - L.mean()
+    TOB = pd.DataFrame(TOB, index=[f"{f:.0f}" for f in _fc]).T.join(records.set_index("record_uid")[["domain", "label"]])
+    TOB["impulsiveness"] = files.groupby("record_uid").file_id.agg(
+        lambda ids: float(np.mean([FILE_STATS[i]["rms"] for i in ids])))   # RMS/đỉnh (đã chuẩn hoá đỉnh)
+    REGIONS = [("< 100 Hz", 20, 100), ("100–300 Hz", 100, 300), ("300–1800 Hz", 300, 1800),
+               ("1.8–4 kHz", 1800, 4000), ("> 4 kHz", 4000, NYQ),
+               (f"front-end {F_MIN_EFF:.0f}–{F_MAX_EFF:.0f} Hz", F_MIN_EFF, F_MAX_EFF), ("full band", 20, NYQ)]
+    def _cols(lo, hi):
+        return [c for c, f in zip(TOB.columns[:len(_fc)], _fc) if lo <= f < hi]
+    rows = []
+    for name, lo, hi in REGIONS + [("impulsiveness (RMS/peak)", None, None)]:
+        cols = ["impulsiveness"] if lo is None else _cols(lo, hi)
+        if not cols:
+            continue
+        row = dict(region=name, n_features=len(cols))
+        for d in DOMAINS_ALL:
+            g = TOB[TOB.domain == d]
+            p = cv_proba(g[cols].values, g.label.values)
+            row[f"within {d}"] = (roc_auc_score(g.label.values, p)
+                                  if np.isfinite(p).all() and g.label.nunique() == 2 else np.nan)
+        for a in DOMAINS_ALL:
+            for b in DOMAINS_ALL:
+                if a == b:
+                    continue
+                ga, gb = TOB[TOB.domain == a], TOB[TOB.domain == b]
+                sc = StandardScaler().fit(ga[cols].values)
+                m = lr_pipe().fit(sc.transform(ga[cols].values), ga.label.values)
+                row[f"{a} → {b}"] = roc_auc_score(gb.label.values, m.predict_proba(sc.transform(gb[cols].values))[:, 1])
+        rows.append(row)
+    SHORTCUT = pd.DataFrame(rows)
+    save_table(SHORTCUT, "band_transferability",
+               "Shortcut check: record-level AUC of a logistic-regression detector on gain-invariant 1/3-octave band "
+               "energies restricted to each frequency region, within each domain (stratified CV) and across domains "
+               "(train on one, test on the other). High within-domain but chance-level cross-domain AUC marks "
+               "domain-specific cues; regions that stay informative across domains carry the transferable signature.", 3)
+    wcols = [c for c in SHORTCUT.columns if c.startswith("within")]
+    xcols = [c for c in SHORTCUT.columns if "→" in c]
+    for _, r in SHORTCUT.iterrows():
+        w = np.nanmax(r[wcols].values.astype(float))
+        x = np.nanmin(r[xcols].values.astype(float)) if xcols else np.nan
+        tag = ("ĐẶC THÙ MIỀN (nghi lối tắt)" if w >= 0.8 and x <= 0.6 else
+               "chuyển giao được" if np.nanmin(r[wcols].values.astype(float)) >= 0.65 and x >= 0.65 else "")
+        if tag:
+            print(f"  {r.region:<28s} trong miền max {w:.2f} | chéo miền min {x:.2f} -> {tag}")
+    fig, ax = plt.subplots(figsize=(13, 4))
+    xx = np.arange(len(SHORTCUT)); cols_ = wcols + xcols; w_ = .8 / len(cols_)
+    shades = [DOMAIN_COLOR.get(c.replace("within ", ""), "#999999") for c in wcols] + ["#444444", "#AAAAAA"][:len(xcols)]
+    for k, c in enumerate(cols_):
+        ax.bar(xx + (k - (len(cols_) - 1) / 2) * w_, SHORTCUT[c], w_, color=shades[k % len(shades)],
+               hatch="" if c in wcols else "//", label=c)
+    ax.axhline(.5, color="k", lw=.8, ls=":")
+    ax.set_xticks(xx); ax.set_xticklabels(SHORTCUT.region, rotation=15); ax.set_ylim(.3, 1.02)
+    ax.set_ylabel("record-level AUC"); ax.legend(ncol=2, fontsize=8, bbox_to_anchor=(1.01, 1), loc="upper left")
+    ax.set_title("Within-domain (solid) vs cross-domain (hatched) informativeness of each frequency region")
+    savefig(fig, "band_transferability",
+            "Shortcut check: within-domain (solid) and cross-domain (hatched) AUC of a classical detector restricted to "
+            "each frequency region. Regions informative only within one domain are acquisition- or rig-specific cues.")
 ''')
 
 md(r'''

@@ -9,8 +9,9 @@ Low-Pressure PVC Water Distribution Pipes Using Deep Convolutional Neural Networ
 | `notebooks/leak-cnn-pvc-kaggle-v6.ipynb` | Bản v6 gốc (kèm output của lần chạy trên 80 bản ghi) — nguồn để dựng v7. |
 | `tools/build_v7.py`, `tools/v7_cells.py` | Dựng v7 **tái lập được** từ v6: mỗi chỉnh sửa là một phép thay thế có kiểm tra. |
 | `tools/run_smoke.py` | Chạy end-to-end ở chế độ smoke (3 epoch, 2 fold, dữ liệu mô phỏng) để kiểm tra toàn tuyến. |
-| `notebooks/leak-ada-dann-kaggle-v1.ipynb` | **Thích ứng miền đối nghịch** (DANN, CDAN+E + AdaBN, Deep CORAL, oracle) cho tập đa miền `tapdulieuMix_16k`. |
-| `tools/build_ada.py`, `tools/ada_cells_{1,2,3}.py` | Dựng notebook ADA từ nội dung cell (biên dịch thử mọi cell trước khi ghi). |
+| `notebooks/leak-ada-dann-kaggle-v2.ipynb` | **Thích ứng miền — bản hiện hành (v2)**: sửa định danh bản ghi S, hoà hợp chuỗi thu hai phía, kiểm tra lối tắt theo dải, đối chứng cơ chế Joint-BN, MCC/TENT, phương pháp đề xuất **RCST**. |
+| `notebooks/leak-ada-dann-kaggle-v1.ipynb` | Bản v1 (DANN, CDAN+E, AdaBN, Deep CORAL, oracle) — đã chạy trên Kaggle, được phản biện trong `docs/DANH_GIA_KET_QUA_ADA_v1.md`. |
+| `tools/build_ada.py`, `tools/ada_cells_{1,2,3}.py` | Dựng notebook ADA v2 từ nội dung cell (biên dịch thử mọi cell trước khi ghi); v1 dựng từ commit `ffda6c3`. |
 | `docs/DANH_GIA_KET_QUA_ADA_v1.md` | Phản biện kết quả chạy ADA v1 trên Kaggle (tính hợp lệ, cơ chế, thống kê) và lộ trình nâng cấp v2 cho bài báo Q1/Q2. |
 | `docs/KE_HOACH_ADA.md` | Kế hoạch chi tiết: phân tích dữ liệu, thiết kế phương pháp, giao thức đánh giá, tham số, danh mục hình/bảng cho bài báo, ngân sách tính toán, lộ trình. |
 
@@ -54,17 +55,19 @@ python tools/build_v7.py notebooks/leak-cnn-pvc-kaggle-v6.ipynb notebooks/leak-c
 
 Chi tiết: mục 16 của notebook v7.
 
-## Thích ứng miền đối nghịch (ADA v1) — tập `tapdulieuMix_16k`
+## Thích ứng miền đối nghịch (ADA v2) — tập `tapdulieuMix_16k`
 
 Xem kế hoạch đầy đủ ở [`docs/KE_HOACH_ADA.md`](docs/KE_HOACH_ADA.md).
 
-**Kaggle:** tải thư mục `tapdulieuMix_16k` lên thành dataset (giữ cấu trúc `<miền>/<leak|noleak>/...`), `Add Data`,
-bật GPU T4 x2, chạy tới mục 2.4 để xác nhận các miền được nhận ra, rồi `Run All`. Kết quả gom trong
-`/kaggle/working/ada_paper_artifacts.zip` (bảng CSV/LaTeX/Markdown, hình PNG+PDF, văn bản nháp Methods/Results).
+**Kaggle:** gắn dataset `tapdulieuMix_16k` (`leak/`, `noleak/` chứa `Rxxx_*` = hiện trường, `Sxx_*` = mô hình thí
+nghiệm), bật GPU T4 x2, chạy tới mục 2.4 để xác nhận hai miền `R_field` / `S_lab` và số bản ghi, rồi
+`Save Version → Save & Run All` (cấu hình mặc định v2 ≈ 4.5–5 giờ trên 2 × T4; giảm `cfg.seeds` hoặc
+`cfg.ablation_variants` nếu cần). Kết quả gom trong `/kaggle/working/ada_paper_artifacts.zip` (bảng CSV/LaTeX/Markdown,
+hình PNG+PDF, văn bản nháp Methods/Results).
 
 **Kiểm tra nhanh ngoài Kaggle (CPU, dữ liệu mô phỏng hai miền):**
 
 ```bash
-python tools/build_ada.py notebooks/leak-ada-dann-kaggle-v1.ipynb
-LEAK_OUT=/tmp/ada_smoke python tools/run_smoke.py notebooks/leak-ada-dann-kaggle-v1.ipynb
+python tools/build_ada.py notebooks/leak-ada-dann-kaggle-v2.ipynb
+LEAK_OUT=/tmp/ada_smoke python tools/run_smoke.py notebooks/leak-ada-dann-kaggle-v2.ipynb
 ```

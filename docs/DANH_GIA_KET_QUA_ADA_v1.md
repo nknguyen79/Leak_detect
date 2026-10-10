@@ -365,3 +365,33 @@ Monitoring* (Q1); *Journal of Pipeline Systems Engineering and Practice*, *Senso
 - [ ] Oracle hợp lệ (target-only và S+T nhóm đúng)
 - [ ] Báo cáo cả xếp hạng (AUC) lẫn hiệu chỉnh và ngưỡng (BAcc, ECE, ước lượng tỉ lệ lớp)
 - [ ] Văn bản tự sinh chỉ dùng sau khi mọi mục trên đã đạt
+
+---
+
+## 9. Trạng thái triển khai trong notebook v2 (`notebooks/leak-ada-dann-kaggle-v2.ipynb`)
+
+Thông tin bổ sung từ tác giả dữ liệu: chuỗi S được thu trên **mô hình thí nghiệm** mô phỏng hệ thống ống gần với thực tế
+(áp suất, loại ống, lưu lượng); khi thu bản ghi noleak **nước vẫn chảy**; số `Sxx` được đánh lại trong mỗi lớp và
+`Sxx_leak` / `Sxx_noleak` **không** thu tại cùng một điểm đo. Hệ quả:
+
+- Giả thuyết "không có dòng chảy" (mục 3.2) bị **bác bỏ**. Giả thuyết còn lại hợp lý nhất: các dấu hiệu < 90 Hz và vạch
+  âm sắc của S là **đáp ứng thủy lực của mô hình thí nghiệm khi có rò** (rò làm tăng lưu lượng → đổi điểm làm việc của
+  bơm → đổi âm sắc/nhiễu dòng chảy tần thấp). Hiện tượng này có thật trong vòng kín có bơm riêng nhưng hầu như không
+  xảy ra ở mạng hiện trường, nên **không chuyển giao được**. Mục 3.9 của v2 định lượng giả thuyết này.
+- Mã bản ghi đúng: `Sxx` **ghép với lớp** (`S01_leak01` + `S01_leak02` = một bản ghi; `S01_leak` ≠ `S01_noleak`).
+  Đây là lựa chọn an toàn: nếu các tệp thật ra độc lập, việc gộp chỉ làm CI bảo thủ hơn, không gây chệch.
+
+| Đề xuất | Trạng thái v2 |
+|---|---|
+| P0.1 Định danh bản ghi S | ✅ `record_regex = ([RS]\d{1,4})`, `record_id_by_class = True`; miền đặt tên `R_field` / `S_lab` |
+| P0.2 Metadata | ⏳ cần tác giả bổ sung (điểm đo, áp suất, kích thước lỗ rò, cảm biến) để mở thêm bài toán chuyển miền |
+| P0.3 Kiểm chứng lối tắt | ✅ mục 3.9: AUC trong miền và chéo miền cho từng vùng tần số |
+| P0.4 Hoà hợp chuỗi thu hai phía | ✅ mục 3.2: so PSD trung bình đã căn mức (không dùng nhãn), dung sai 6 dB, trần f_min 300 Hz |
+| P0.5 Đối chứng cơ chế | ✅ `joint_bn`, bảng phân rã cơ chế (mục 9.2b), bộ phân biệt 1024 / lr ×10, độ chính xác bộ phân biệt ở chế độ eval, ablation `weak_disc` |
+| P0.6 Thống kê | ✅ ablation 3 seed, p ghi `< 1/B`, Holm chỉ trên phương pháp UDA |
+| P1.1 RCST (nhãn giả mức bản ghi + nhất quán trong bản ghi) | ✅ `rcst` + ablation `rcst_no_pl`, `rcst_no_cons`; theo dõi độ chính xác nhãn giả mức bản ghi so với mức frame |
+| P1.2 Căn chỉnh đối nghịch mức bản ghi (MIL) | ⏳ chưa làm (bước tiếp theo nếu RCST cho kết quả tốt) |
+| P1.3 Ngẫu nhiên hoá chuỗi thu | ✅ thông cao 20–200 Hz, độ dốc ±3 dB/oct, thông thấp 3.5–8 kHz; ablation `no_chain_aug`, `so_no_chain_aug` |
+| P1.4 Baseline hiện đại | ✅ MCC, TENT; ⏳ SHOT, FixMatch/AdaMatch |
+| P1.5 Dịch chuyển nhãn (EM/BBSE, IW-CDAN) | ⏳ chưa làm |
+| P2 Thêm miền, SSDA, chỉ số vận hành | ⏳ SSDA có sẵn (`cfg.run_ssda=True`); thêm miền cần metadata |

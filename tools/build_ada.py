@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Dựng notebook Adversarial Domain Adaptation (ADA v1) từ các tệp nội dung cell.
+"""Dựng notebook Adversarial Domain Adaptation (ADA v2) từ các tệp nội dung cell.
 
-    python tools/build_ada.py notebooks/leak-ada-dann-kaggle-v1.ipynb
+Bản v1 (notebooks/leak-ada-dann-kaggle-v1.ipynb) được dựng từ commit ffda6c3 của các tệp này.
+
+    python tools/build_ada.py notebooks/leak-ada-dann-kaggle-v2.ipynb
 
 Nội dung cell nằm ở tools/ada_cells_1.py (giới thiệu, dữ liệu đa miền, EDA dịch chuyển miền),
 tools/ada_cells_2.py (kiến trúc, giao thức, huấn luyện) và tools/ada_cells_3.py (kết quả, phân tích,
@@ -16,7 +18,7 @@ import ada_cells_1 as A  # noqa: E402
 import ada_cells_2 as B  # noqa: E402
 import ada_cells_3 as C  # noqa: E402
 
-DST = Path(sys.argv[1] if len(sys.argv) > 1 else "notebooks/leak-ada-dann-kaggle-v1.ipynb")
+DST = Path(sys.argv[1] if len(sys.argv) > 1 else "notebooks/leak-ada-dann-kaggle-v2.ipynb")
 
 cells = []
 for kind, text in A.CELLS + B.CELLS + C.CELLS:
@@ -40,7 +42,7 @@ nb = {
         "accelerator": "GPU",
         "kaggle": {"accelerator": "nvidiaTeslaT4", "dataSources": [], "isGpuEnabled": True,
                    "isInternetEnabled": False, "language": "python", "sourceType": "notebook"},
-        "leak_ada_version": "v1",
+        "leak_ada_version": "v2",
     },
     "nbformat": 4,
     "nbformat_minor": 5,

@@ -113,8 +113,15 @@ def method_summary(task, method, variant="main", rule=None, seeds=None, shots=No
     return dict(g=g, V=V, per=pd.DataFrame(per), ens=rec_metrics(g), src_val=float(np.nanmean(srcv)),
                 thr_src=float(np.nanmean(thr)), ens_srcthr=rec_metrics(g, float(np.nanmean(thr))))
 
-METHODS_REPORT = [m for m in ("source_only", "adabn", "coral", "mmd", "dann", "cdan", "cdan_e", "oracle")
-                  if m in cfg.methods]
+METHODS_REPORT = [m for m in ("source_only", "joint_bn", "adabn", "tent", "coral", "mmd", "mcc", "dann", "cdan",
+                              "cdan_e", "rcst", "oracle", "target_only") if m in cfg.methods]
+REFERENCE_METHODS = ("oracle", "target_only")          # cận trên tham chiếu: không vào họ kiểm định Holm
+
+def _pf(p):
+    # p của bootstrap B lần không nhỏ hơn được 1/B -> ghi "< 1/B" thay cho 0.000
+    if not np.isfinite(p):
+        return "–"
+    return f"< {1 / cfg.bootstrap_n:.4f}".rstrip("0") if p < 1 / cfg.bootstrap_n else f"{p:.3f}"
 print("Phương pháp báo cáo:", [mlabel(m) for m in METHODS_REPORT])
 ''')
 
@@ -151,8 +158,9 @@ def build_main_table(variant="main", rule=None, seeds=None, methods=None, verbos
                 d, dlo, dhi, p = paired_delta(S["g"].loc[common, "y"].values, S["g"].loc[common, "p"].values,
                                               ref["g"].loc[common, "p"].values, seed=17 + T["i"])
                 row.update(dAUC=d, dAUC_lo=dlo, dAUC_hi=dhi, p_boot=p)
-                fam.append(len(rows))
-            if ref is not None and orc is not None and m not in ("source_only", "oracle"):
+                if m not in REFERENCE_METHODS:
+                    fam.append(len(rows))
+            if ref is not None and orc is not None and m not in ("source_only",) + REFERENCE_METHODS:
                 gap = orc["ens"]["auc"] - ref["ens"]["auc"]
                 if gap > 0.02:
                     row["gap_closed_pct"] = 100 * (e["auc"] - ref["ens"]["auc"]) / gap
@@ -176,15 +184,69 @@ pretty = pd.DataFrame(dict(
        "BAcc": MAIN.BAcc.round(3), "BAcc@src-thr": MAIN.BAcc_srcthr.round(3),
        "F1": MAIN.F1.round(3), "MCC": MAIN.MCC.round(3),
        "ΔAUC vs SO [95% CI]": [_ci(a, l, h) for a, l, h in zip(MAIN.dAUC, MAIN.dAUC_lo, MAIN.dAUC_hi)],
-       "p (Holm)": MAIN.p_holm.round(4), "Gap closed (%)": MAIN.gap_closed_pct.round(1),
+       "p (Holm)": [_pf(v) for v in MAIN.p_holm], "Gap closed (%)": MAIN.gap_closed_pct.round(1),
        "Source-val AUC": MAIN.SrcVal_AUC.round(3)}))
 MAIN.to_csv(TAB_DIR / "main_results_numeric.csv", index=False)
 save_table(pretty, "main_results",
            f"Target-domain recording-level results (checkpoint rule '{cfg.select_rule}', {len(cfg.seeds)} seeds, "
            f"{cfg.record_agg} aggregation, threshold {cfg.threshold}). ΔAUC: paired bootstrap over target recordings vs "
-           "source-only, Holm-adjusted within task. BAcc@src-thr: balanced accuracy at the Youden threshold of the "
+           "source-only, Holm-adjusted within task over the unsupervised methods (references excluded). BAcc@src-thr: balanced accuracy at the Youden threshold of the "
            "source-validation recordings (label-free on target). Source-val AUC: retained performance on held-out "
            "source recordings.", 3)
+''')
+
+code(r'''
+# =========================================================
+# 9.2b [V2] PHÂN RÃ CƠ CHẾ: lợi ích đến từ chuẩn hoá (BatchNorm) hay từ căn chỉnh? / Mechanism decomposition
+#      v1: bộ phân biệt ở mức may rủi từ epoch 1, PAD không giảm, quét λ phẳng -> giả thuyết "lô trộn nguồn+đích
+#      qua BatchNorm" (joint-BN) mới là nguồn lợi ích chính. Các hiệu ΔAUC ghép cặp dưới đây kiểm định trực tiếp.
+# =========================================================
+MECH_PAIRS = [("joint_bn", "source_only", "mixed source+target batches through BatchNorm, no alignment loss"),
+              ("adabn", "source_only", "post-hoc BatchNorm re-estimation only"),
+              ("tent", "adabn", "test-time entropy minimisation on BN affine parameters"),
+              ("coral", "joint_bn", "second-order alignment beyond joint-BN"),
+              ("mcc", "joint_bn", "class-confusion minimisation beyond joint-BN"),
+              ("dann", "joint_bn", "adversarial alignment beyond joint-BN"),
+              ("cdan_e", "joint_bn", "conditional adversarial alignment beyond joint-BN"),
+              ("rcst", "dann", "record-consistent self-training beyond DANN"),
+              ("rcst", "source_only", "total gain of the proposed method")]
+_mr = []
+for T in TASKS:
+    for a, b, meaning in MECH_PAIRS:
+        A, B = MAIN_STORE.get((T["i"], a)), MAIN_STORE.get((T["i"], b))
+        if A is None or B is None:
+            continue
+        cm = A["g"].index.intersection(B["g"].index)
+        d, lo, hi, p = paired_delta(A["g"].loc[cm, "y"].values, A["g"].loc[cm, "p"].values,
+                                    B["g"].loc[cm, "p"].values, seed=31)
+        _mr.append(dict(task=T["name"], contrast=f"{mlabel(a)} − {mlabel(b)}", meaning=meaning,
+                        dAUC=d, lo=lo, hi=hi, p_boot=p))
+MECH = pd.DataFrame(_mr)
+if len(MECH):
+    MECH["p_holm"] = np.concatenate([holm(g.p_boot.values) for _, g in MECH.groupby("task", sort=False)])
+    save_table(MECH, "mechanism_decomposition",
+               "Mechanism decomposition: paired recording-level ΔAUC (bootstrap over target recordings) isolating the "
+               "contribution of target-aware normalisation (joint-BN, AdaBN, TENT), of each alignment objective on top of "
+               "joint-BN, and of record-consistent self-training on top of DANN. Holm correction within task.", 3)
+    for T in TASKS:
+        d = MECH[MECH.task == T["name"]]
+        for _, r in d.iterrows():
+            sig = np.isfinite(r.lo) and (r.lo > 0 or r.hi < 0) and r.p_holm < .05
+            print(f"  {T['name']:>18s} | {r.contrast:<34s} ΔAUC {r.dAUC:+.3f} [{r.lo:+.3f}, {r.hi:+.3f}] "
+                  f"p_Holm {_pf(r.p_holm):>8s} {'*' if sig else ''}")
+    fig, axes = plt.subplots(1, len(TASKS), figsize=(6.5 * len(TASKS), 0.45 * len(MECH_PAIRS) + 1.6), squeeze=False)
+    for ti, T in enumerate(TASKS):
+        ax = axes[0, ti]; d = MECH[MECH.task == T["name"]].reset_index(drop=True)
+        for i, r in d.iterrows():
+            sig = np.isfinite(r.lo) and (r.lo > 0 or r.hi < 0) and r.p_holm < .05
+            ax.errorbar(r.dAUC, i, xerr=[[r.dAUC - r.lo], [r.hi - r.dAUC]], fmt="D" if sig else "o", capsize=3,
+                        color="#D62828" if "RCST" in r.contrast else "#2E6F95", mfc=None if sig else "white")
+        ax.axvline(0, color="k", lw=1)
+        ax.set_yticks(range(len(d))); ax.set_yticklabels(d.contrast, fontsize=8); ax.invert_yaxis()
+        ax.set_xlabel("paired ΔAUC (target recordings)"); ax.set_title(T["name"])
+    savefig(fig, "mechanism_decomposition",
+            "Where does the adaptation gain come from? Paired ΔAUC for normalisation-only controls, for each alignment "
+            "objective beyond joint-BN, and for record-consistent self-training beyond DANN (filled = Holm p < 0.05).")
 ''')
 
 code(r'''
@@ -313,36 +375,52 @@ không còn phân biệt được), trong khi mất mát phân lớp nguồn v�
 
 code(r'''
 # =========================================================
-# 10.1 Mất mát, độ chính xác bộ phân biệt miền, λ_p / losses, discriminator accuracy, lambda
+# 10.1 Mất mát, độ chính xác bộ phân biệt (lô huấn luyện và CHẾ ĐỘ EVAL), λ_p, chất lượng nhãn giả RCST
 # =========================================================
 s0 = cfg.seeds[0]
-adv_present = [m for m in ("dann", "cdan", "cdan_e") if m in cfg.methods]
-fig, axes = plt.subplots(1, 4, figsize=(17, 3.4))
-for m in [x for x in ("source_only", "coral", "mmd", "dann", "cdan_e", "oracle") if x in cfg.methods]:
-    rs = [r for r in results_where("main", 0, m, s0) if r.get("ep_hist") is not None]
-    rs = [r for r in rs if r["fold"] in (0, None)]
-    if not rs:
+def _first_run(m):
+    rs = [r for r in results_where("main", 0, m, s0) if r.get("ep_hist") is not None and r["fold"] in (0, None)]
+    return rs[0] if rs else None
+fig, axes = plt.subplots(2, 3, figsize=(17, 7.2)); axes = axes.ravel()
+for m in [x for x in METHODS_REPORT if x not in POSTHOC_METHODS]:
+    r = _first_run(m)
+    if r is None:
         continue
-    E = rs[0]["ep_hist"]; c = METHOD_COLOR.get(m, "k")
+    E, H = r["ep_hist"], r["hist"]; c = METHOD_COLOR.get(m, "k")
     axes[0].plot(E.epoch, E.loss_cls, color=c, label=mlabel(m))
     if m in ADV_METHODS:
         axes[1].plot(E.epoch, E.loss_da, color=c, label=mlabel(m))
-        axes[2].plot(E.epoch, E.disc_acc, color=c, label=mlabel(m))
-    elif m in ("coral", "mmd"):
+        axes[2].plot(E.epoch, E.disc_acc, color=c, ls=":", lw=1)
+        if "disc_acc_eval" in H:
+            axes[2].plot(H.epoch, H.disc_acc_eval, color=c, marker="o", ms=3, label=f"{mlabel(m)} (eval)")
+    elif m in ("coral", "mmd", "mcc"):
         axes[1].plot(E.epoch, E.loss_da, color=c, ls="--", label=f"{mlabel(m)} (weighted)")
-    if m in ADV_METHODS or m == "coral":
+    if m in ADV_METHODS or m in ("coral", "mcc"):
         axes[3].plot(E.epoch, E.lam, color=c, label=mlabel(m))
+    if m == "rcst":
+        if "pl_acc_rec" in E and E.pl_acc_rec.notna().any():
+            axes[4].plot(E.epoch, E.pl_acc_rec, color=c, marker="o", ms=3, label="record-level pseudo-labels")
+            axes[4].plot(E.epoch, E.pl_acc_frame, color="#555555", marker="s", ms=3, ls="--",
+                         label="frame-level, same coverage")
+            ax2 = axes[4].twinx(); ax2.plot(E.epoch, E.pl_cov, color="#BBBBBB", lw=1)
+            ax2.set_ylim(0, 1); ax2.set_ylabel("coverage (fraction of records)", color="#888888"); ax2.grid(False)
+        axes[5].plot(E.epoch, E.loss_st, color=c, label="pseudo-label + consistency loss")
 axes[0].set_title("(a) label loss $\\mathcal{L}_y$ (train)"); axes[0].legend(fontsize=7)
-axes[1].set_title("(b) domain loss $\\mathcal{L}_d$ / alignment loss"); axes[1].legend(fontsize=7)
-axes[1].axhline(math.log(2), color="k", ls=":", lw=.8)
-axes[2].set_title("(c) discriminator accuracy (train batches)"); axes[2].axhline(.5, color="k", ls=":", lw=.8)
+axes[1].set_title("(b) domain loss $\\mathcal{L}_d$ / alignment loss"); axes[1].axhline(math.log(2), color="k", ls=":", lw=.8)
+axes[1].legend(fontsize=7)
+axes[2].set_title("(c) discriminator accuracy: train batches (dotted) vs eval mode"); axes[2].axhline(.5, color="k", ls=":", lw=.8)
 axes[2].set_ylim(.3, 1.02); axes[2].legend(fontsize=7)
 axes[3].set_title("(d) adaptation weight λ_p"); axes[3].legend(fontsize=7)
-for a in axes:
-    a.set_xlabel("epoch")
+axes[4].set_title("(e) RCST pseudo-label accuracy [monitor, uses target labels]"); axes[4].set_ylim(0, 1.02)
+axes[4].legend(fontsize=7, loc="lower left")
+axes[5].set_title("(f) RCST self-training loss"); axes[5].legend(fontsize=7)
+for a_ in axes:
+    a_.set_xlabel("epoch")
 savefig(fig, "adversarial_dynamics",
-        f"Training dynamics on {TASKS[0]['name']} (seed {s0}, fold 0): (a) source label loss, (b) domain-discriminator "
-        "loss (dotted: ln 2, the chance level) or weighted CORAL/MMD loss, (c) discriminator accuracy, (d) λ_p.")
+        f"Training dynamics on {TASKS[0]['name']} (seed {s0}, fold 0): (a) source label loss; (b) domain-discriminator loss "
+        "(dotted: ln 2) or weighted alignment loss; (c) discriminator accuracy on noisy training batches (dotted) and in "
+        "eval mode on held-out features (markers); (d) λ_p; (e) accuracy of record-level versus frame-level pseudo-labels "
+        "at equal coverage (grey: fraction of target recordings pseudo-labelled); (f) RCST self-training loss.")
 ''')
 
 code(r'''
@@ -401,6 +479,8 @@ if _so is not None and _so["state"] is not None:
     KEPT["source_only"] = load_state(LeakNet().to(DEVICE), _so["state"]).eval()
     if "adabn" in cfg.methods:
         KEPT["adabn"] = adabn_model(_so["state"], tgt_tr0, DEVICE)
+    if "tent" in cfg.methods:
+        KEPT["tent"] = tent_model(_so["state"], tgt_tr0, DEVICE)
 for m in TRAINED:
     r = RESULTS.get(job_key(dict(variant="main", task=FS_T, seed=FS_S, fold=0, method=m)))
     if r is not None and r["state"] is not None:
@@ -627,33 +707,43 @@ code(r'''
 # =========================================================
 # 13.2 Ablation / ablation study
 # =========================================================
-ABLATIONS = {"no_fir": ("dann", {"fir_p": 0.0}, "dann"), "no_aug": ("dann", {"augment": False}, "dann"),
-             "no_balance": ("dann", {"balanced": False}, "dann"), "cdan_noent": ("cdan", {}, "cdan_e")}
+ABLATIONS = {
+    "weak_disc": ("dann", {"disc_hidden": 256, "disc_lr_mult": 1.0}, "dann"),     # bộ phân biệt của v1
+    "no_chain_aug": ("rcst", {"chain_p": 0.0}, "rcst"),
+    "rcst_no_pl": ("rcst", {"rcst_pl": False}, "rcst"),
+    "rcst_no_cons": ("rcst", {"rcst_cons": False}, "rcst"),
+    "so_no_chain_aug": ("source_only", {"chain_p": 0.0}, "source_only"),
+    "no_fir": ("dann", {"fir_p": 0.0}, "dann"), "no_aug": ("dann", {"augment": False}, "dann"),
+    "no_balance": ("dann", {"balanced": False}, "dann"), "cdan_noent": ("cdan", {}, "cdan_e")}
+AB_S = tuple(cfg.ablation_seeds)
 if cfg.run_ablation:
     todo = {k: v for k, v in ABLATIONS.items() if k in cfg.ablation_variants and v[2] in cfg.methods}
     jobs = []
     for name, (m, hp, _) in todo.items():
-        jobs += main_jobs(variant=f"abl_{name}", methods=[m], seeds=SW_S, tasks=[SW_T], hp=hp)
+        if m == "source_only":                       # source-only không dùng đích -> một job mỗi seed
+            jobs += [dict(variant=f"abl_{name}", task=SW_T, seed=s_, fold=None, method=m, hp=hp) for s_ in AB_S]
+        else:
+            jobs += main_jobs(variant=f"abl_{name}", methods=[m], seeds=AB_S, tasks=[SW_T], hp=hp)
     run_jobs(jobs, "ablation")
     ab_rows = []
     for name, (m, hp, refm) in todo.items():
-        S = method_summary(SW_T, m, f"abl_{name}", seeds=SW_S)
-        R = method_summary(SW_T, refm, "main", seeds=SW_S)
+        S = method_summary(SW_T, m, f"abl_{name}", seeds=AB_S)
+        R = method_summary(SW_T, refm, "main", seeds=AB_S)
         if S is None or R is None:
             continue
         common = S["g"].index.intersection(R["g"].index)
         d, lo, hi, p = paired_delta(S["g"].loc[common, "y"], S["g"].loc[common, "p"], R["g"].loc[common, "p"], seed=5)
         ab_rows.append(dict(variant=name, method=mlabel(m), reference=mlabel(refm), AUC=S["ens"]["auc"],
-                            AUC_reference=R["ens"]["auc"], dAUC=d, dAUC_lo=lo, dAUC_hi=hi, p_boot=p))
+                            AUC_reference=R["ens"]["auc"], dAUC=d, dAUC_lo=lo, dAUC_hi=hi, p_boot=p, key=m))
     if ab_rows:
         ABL = pd.DataFrame(ab_rows); ABL["p_holm"] = holm(ABL.p_boot.values)
-        save_table(ABL, "ablation",
-                   f"Ablation on {TASKS[SW_T]['name']} (seeds {list(SW_S)}): target AUC of each variant, its reference "
+        save_table(ABL.drop(columns="key"), "ablation",
+                   f"Ablation on {TASKS[SW_T]['name']} (seeds {list(AB_S)}): target AUC of each variant, its reference "
                    "configuration, and paired ΔAUC (variant − reference) with Holm correction.", 3)
-        fig, ax = plt.subplots(figsize=(7, 0.5 * len(ABL) + 1.4))
+        fig, ax = plt.subplots(figsize=(7.5, 0.5 * len(ABL) + 1.4))
         for i, r in ABL.iterrows():
             ax.errorbar(r.dAUC, i, xerr=[[r.dAUC - r.dAUC_lo], [r.dAUC_hi - r.dAUC]], fmt="o", capsize=3,
-                        color=METHOD_COLOR.get("dann" if r.variant != "cdan_noent" else "cdan_e"))
+                        color=METHOD_COLOR.get(r.key, "k"))
         ax.axvline(0, color="k", lw=1)
         ax.set_yticks(range(len(ABL))); ax.set_yticklabels([f"{v} (vs {rf})" for v, rf in zip(ABL.variant, ABL.reference)])
         ax.invert_yaxis(); ax.set_xlabel("ΔAUC (variant − reference), paired bootstrap")
@@ -724,7 +814,7 @@ code(r'''
 if cfg.run_band_occlusion and cfg.backbone == "cnn2d" and KEPT:
     G = 8
     edges = np.linspace(0, SPEC_SHAPE[1], G + 1).astype(int)
-    mel_hz = librosa.mel_frequencies(n_mels=SPEC_SHAPE[1] + 2, fmin=cfg.f_min, fmax=F_MAX_EFF, htk=True)[1:-1]
+    mel_hz = librosa.mel_frequencies(n_mels=SPEC_SHAPE[1] + 2, fmin=F_MIN_EFF, fmax=F_MAX_EFF, htk=True)[1:-1]
     labels_ = [f"{mel_hz[a]:.0f}–{mel_hz[b - 1]:.0f}" for a, b in zip(edges[:-1], edges[1:])]
     occ_rows = []
     for m, net in KEPT.items():
@@ -784,11 +874,18 @@ hp_rows = [
     ("Data", "Frame / hop", f"{cfg.frame_sec:g} s / {cfg.hop_sec:g} s at {cfg.target_sr} Hz"),
     ("Pre-processing", "Filters", f"DC removal, {cfg.highpass_hz:g} Hz high-pass, "
                                   f"{'50 Hz notch ×' + str(cfg.mains_harmonics) if cfg.notch_mains else 'no notch'}, per-file peak norm"),
-    ("Front-end", "log-Mel", f"{cfg.n_mels} bands, n_fft {cfg.n_fft}, hop {cfg.hop_length}, {cfg.f_min:g}–{F_MAX_EFF:.0f} Hz"
+    ("Data", "Recording identity", "Rxxx / Sxx qualified by domain" + (" and class" if cfg.record_id_by_class else "")),
+    ("Front-end", "log-Mel", f"{cfg.n_mels} bands, n_fft {cfg.n_fft}, hop {cfg.hop_length}, {F_MIN_EFF:.0f}–{F_MAX_EFF:.0f} Hz"
                              + (" (bandwidth-harmonised)" if HARMONISED else "")),
     ("Front-end", "SpecAugment", f"2 freq masks ≤{cfg.specaug_freq_mask}, 2 time masks ≤{cfg.specaug_time_mask}"),
     ("Network", "G_f widths / bottleneck", f"{list(cfg.widths)} / {cfg.bottleneck_dim}"),
-    ("Network", "Discriminator", f"MLP {cfg.disc_hidden}-{cfg.disc_hidden}-1, dropout {cfg.disc_dropout}"),
+    ("Network", "Discriminator", f"MLP {cfg.disc_hidden}-{cfg.disc_hidden}-1, dropout {cfg.disc_dropout}, "
+                                 f"lr ×{cfg.disc_lr_mult:g}"),
+    ("Adaptation", "RCST", f"pseudo-labels from epoch {int(math.ceil(cfg.rcst_start_frac * cfg.epochs))}, record selection "
+                           f"{cfg.rcst_sel[0]:.0%}→{cfg.rcst_sel[1]:.0%} (rank-balanced), bag {cfg.rcst_bag[0]}×{cfg.rcst_bag[1]}, "
+                           f"weights PL {cfg.rcst_pl_weight:g} / consistency {cfg.rcst_cons_weight:g}"),
+    ("Adaptation", "MCC / TENT", f"MCC weight {cfg.mcc_weight:g}, T = {cfg.mcc_temp:g}; TENT {cfg.tent_steps} steps, "
+                                 f"Adam lr {cfg.tent_lr:g} on BN affine parameters"),
     ("Adaptation", "λ schedule", f"λ_max(2/(1+exp(−{cfg.lambda_gamma:g}p))−1), λ_max = {cfg.lambda_max:g}"),
     ("Adaptation", "CORAL / MMD weight", f"{cfg.coral_weight:g} / {cfg.mmd_weight:g} (same ramp)"),
     ("Optimisation", "Optimiser", f"AdamW, lr {cfg.lr:g} (disc ×{cfg.disc_lr_mult:g}), wd {cfg.weight_decay:g}"),
@@ -797,6 +894,8 @@ hp_rows = [
     ("Optimisation", "Regularisation", f"label smoothing {cfg.label_smoothing}, grad-clip {cfg.grad_clip}, AMP={cfg.amp}"),
     ("Augmentation", "Waveform", f"random FIR p={cfg.aug_fir_p}, noise SNR {cfg.aug_noise_snr_db} dB p={cfg.aug_noise_p}, "
                                  f"circular shift p={cfg.aug_shift_p}"),
+    ("Augmentation", "Acquisition-chain randomisation", f"p={cfg.aug_chain_p}, high-pass {cfg.aug_hp_hz} Hz, tilt "
+                                                        f"{cfg.aug_tilt_db_oct} dB/oct, low-pass {cfg.aug_lp_hz} Hz"),
     ("Protocol", "Target", f"{cfg.target_protocol}, {cfg.tgt_folds}-fold over target recordings"),
     ("Protocol", "Source validation", f"{cfg.src_val_frac:.0%} of source recordings"),
     ("Protocol", "Repetitions", f"seeds {list(cfg.seeds)}"),
@@ -823,43 +922,57 @@ def _sig(r):
 L = ["# Draft text (auto-generated from measured results — verify before use)\n", "## Methods (draft)\n"]
 L.append(
     f"Recordings from {len(DOMAINS_ALL)} acquisition domains ({', '.join(DOMAINS_ALL)}) of the tapdulieuMix_16k corpus were "
-    f"used ({len(records)} independent recordings, {records.duration_s.sum() / 60:.1f} min; recording identifiers were "
-    f"qualified by domain). Signals were resampled to {cfg.target_sr} Hz, high-pass filtered at {cfg.highpass_hz:g} Hz, "
-    f"notch-filtered at 50 Hz and harmonics, peak-normalised per file and split into {cfg.frame_sec:g}-s frames with "
-    f"{cfg.hop_sec:g}-s hop. "
-    + (f"Because the domains differed in effective bandwidth, all spectral front-ends were limited to the common band "
-       f"0–{F_MAX_EFF:.0f} Hz. " if HARMONISED else "")
-    + f"A log-Mel CNN feature extractor with a {cfg.bottleneck_dim}-d bottleneck was shared by all methods. We compared "
-      f"source-only training, AdaBN, Deep CORAL, DANN (gradient reversal, λ_p ramped to λ_max = {cfg.lambda_max:g}) and "
-      f"CDAN+E, with a supervised source+target oracle as an upper reference. Each transfer task was evaluated with an "
-      f"inductive {cfg.tgt_folds}-fold split of the target recordings: unlabelled target data used for adaptation never "
-      f"included the recordings being tested. Training used AdamW ({cfg.epochs}×{cfg.iters_per_epoch} iterations, "
-      f"batch {cfg.batch_size}+{cfg.batch_size}); the checkpoint was chosen by the pre-registered '{cfg.select_rule}' rule "
+    f"used ({len(records)} independent recordings, {records.duration_s.sum() / 60:.1f} min). Files belonging to the same "
+    f"acquisition were grouped into one recording (identifier qualified by domain"
+    + (" and class" if cfg.record_id_by_class else "") + "), which is the unit of every split and statistic. "
+    f"Signals were resampled to {cfg.target_sr} Hz, high-pass filtered at {cfg.highpass_hz:g} Hz, notch-filtered at 50 Hz "
+    f"and harmonics, peak-normalised per file and split into {cfg.frame_sec:g}-s frames with {cfg.hop_sec:g}-s hop. "
+    + (f"Because the domain-average spectra (computed without labels) differed by more than {cfg.harmonise_tol_db:g} dB "
+       f"outside {F_MIN_EFF:.0f}–{F_MAX_EFF:.0f} Hz, all spectral front-ends were restricted to this common band. "
+       if HARMONISED else "")
+    + f"A log-Mel CNN feature extractor with a {cfg.bottleneck_dim}-d bottleneck was shared by all methods, and training "
+      f"used acquisition-chain randomisation (random high-pass, spectral tilt and low-pass) in addition to random-FIR, "
+      f"noise and shift augmentation. We compared source-only training; normalisation-based adaptation (joint "
+      f"source+target BatchNorm without any alignment loss, AdaBN, TENT); Deep CORAL; MCC; DANN and CDAN+E with a "
+      f"{cfg.disc_hidden}-unit discriminator trained at {cfg.disc_lr_mult:g}× the learning rate (λ_p ramped to "
+      f"λ_max = {cfg.lambda_max:g}); and the proposed record-consistent self-training (RCST), which adds rank-balanced "
+      f"recording-level pseudo-labels and a within-recording consistency penalty to DANN. Supervised source+target and "
+      f"target-only models served as upper references. Each transfer task was evaluated with an inductive "
+      f"{cfg.tgt_folds}-fold split of the target recordings: unlabelled target data used for adaptation never included "
+      f"the recordings being tested. Training used AdamW ({cfg.epochs}×{cfg.iters_per_epoch} iterations, batch "
+      f"{cfg.batch_size}+{cfg.batch_size}); the checkpoint was chosen by the pre-registered '{cfg.select_rule}' rule "
       f"without target labels. Experiments were repeated with {len(cfg.seeds)} seeds (new partitions and initialisations) "
-      f"and out-of-fold probabilities were averaged across seeds. The primary metric is the recording-level AUC "
-      f"(mean frame probability); 95% CIs were obtained by bootstrap over target recordings ({cfg.bootstrap_n} resamples) "
-      f"and methods were compared with source-only by paired bootstrap ΔAUC with Holm correction.\n")
+      f"and out-of-fold probabilities were averaged across seeds. The primary metric is the recording-level AUC (mean "
+      f"frame probability); 95% CIs were obtained by bootstrap over target recordings ({cfg.bootstrap_n} resamples) and "
+      f"methods were compared with source-only by paired bootstrap ΔAUC with Holm correction.\n")
 L.append("\n## Results (draft)\n")
 VN = []
 for T in TASKS:
-    so, dn, ce, orc = (_row(T["name"], m) for m in ("source_only", "dann", "cdan_e", "oracle"))
+    so, dn, ce, rc, orc = (_row(T["name"], m) for m in ("source_only", "dann", "cdan_e", "rcst", "oracle"))
     s = f"**{T['name']}.** "
     if so is not None:
         s += f"Source-only reached a target AUC of {_ci(so.AUC, so.AUC_lo, so.AUC_hi)}. "
-    for r in (dn, ce):
+    for r in (dn, ce, rc):
         if r is None:
             continue
         verdict = ("significantly improved" if _sig(r) and r.dAUC > 0 else
                    "significantly reduced" if _sig(r) else "did not significantly change")
         s += (f"{r.method} {verdict} the target AUC ({r.AUC:.3f}; ΔAUC = {_ci(r.dAUC, r.dAUC_lo, r.dAUC_hi)}, "
-              f"Holm p = {r.p_holm:.3f}" + (f", {r.gap_closed_pct:.0f}% of the source–oracle gap closed"
+              f"Holm p {_pf(r.p_holm)}" + (f", {r.gap_closed_pct:.0f}% of the source–oracle gap closed"
                                              if np.isfinite(r.gap_closed_pct) else "") + "). ")
         VN.append(f"- {T['name']}: {r.method} AUC {r.AUC:.3f} (ΔAUC {r.dAUC:+.3f} [{r.dAUC_lo:+.3f}, {r.dAUC_hi:+.3f}], "
-                  f"p Holm {r.p_holm:.3f}) → " + ("CẢI THIỆN có ý nghĩa" if _sig(r) and r.dAUC > 0 else
+                  f"p Holm {_pf(r.p_holm)}) → " + ("CẢI THIỆN có ý nghĩa" if _sig(r) and r.dAUC > 0 else
                                                   "GIẢM có ý nghĩa" if _sig(r) else "KHÔNG khác biệt có ý nghĩa"))
     if orc is not None:
         s += f"The supervised oracle reached {_ci(orc.AUC, orc.AUC_lo, orc.AUC_hi)}."
     L.append(s + "\n")
+if "MECH" in globals() and len(MECH):
+    for T in TASKS:
+        d = MECH[MECH.task == T["name"]].set_index("contrast")
+        parts = [f"{c}: ΔAUC {r.dAUC:+.3f} [{r.lo:+.3f}, {r.hi:+.3f}], Holm p {_pf(r.p_holm)}" for c, r in d.iterrows()
+                 if c.startswith(("Joint-BN", "DANN − Joint", "RCST − DANN"))]
+        if parts:
+            L.append(f"\nMechanism ({T['name']}): " + "; ".join(parts) + ".\n")
 if "FS_TAB" in globals() and len(FS_TAB):
     pads = {r.representation: r.PAD for r in FS_TAB.itertuples()}
     L.append(f"\nOn {TASKS[FS_T]['name']}, the proxy A-distance between source and target features was "
