@@ -41,11 +41,23 @@ Kế hoạch gồm 4 khối:
 Tập nằm trên máy cục bộ (`D:\OneDrive - ctu.edu.vn\NCS_NKNGUYEN\Nam2026\TapDulieu_2025\tapdulieuMix_16k`) nên kế hoạch
 **không giả định cứng** cấu trúc. Notebook:
 
-- tự dò thư mục gốc theo tên `tapdulieuMix_16k` trong `/kaggle/input`, in **cây thư mục kèm số tệp** (mục 2.2);
-- nhận miền từ **thư mục không phải nhãn** trên đường dẫn tương đối, hỗ trợ cả hai bố cục
-  `<miền>/<leak|noleak>/...` và `<leak|noleak>/<miền>/...`; nếu miền nằm trong tên tệp → `cfg.domain_source="regex"`,
-  nếu có bảng metadata → `"csv"` (`record_id,domain`); gộp/đổi tên miền bằng `cfg.domain_alias`;
-- **dừng với hướng dẫn cụ thể** nếu chỉ nhận ra một miền.
+- tự dò thư mục gốc theo tên `tapdulieuMix_16k` trong `/kaggle/input` (khớp cả slug `tapdulieumix-16k`), in **cây thư mục
+  kèm số tệp** (mục 2.2);
+- nhận miền (mục 2.3), `cfg.domain_source="auto"` thử lần lượt và lấy cách **đầu tiên** cho ≥ 2 miền hợp lệ:
+
+  | Cách | Bố cục dữ liệu | Miền nhận được |
+  |---|---|---|
+  | `folder` | `tapdulieuMix_16k/<miền>/<leak\|noleak>/...` hoặc `<leak\|noleak>/<miền>/...` | tên thư mục |
+  | `label_folder` | `leak_16k/`, `noleak_8k/`, `leak_tt/`... (nhãn và miền chung một tên thư mục) | `16k`, `8k`, `tt` |
+  | `filename` | `leak/ptn_R001_leak01.wav`, `leak/R001_tt_leak01.wav` | `ptn`, `tt` |
+  | `bandwidth` | thư mục phẳng, trộn dữ liệu thu 8 kHz (nâng lên 16 kHz) và thu gốc 16 kHz | `chain_8k`, `chain_16k` |
+
+  Khai báo tay: `cfg.domain_roots` (**mỗi dataset một miền**, ví dụ tập Mix + tập hiện trường `field_rec_8k_V7.2`),
+  `"regex"` (`cfg.domain_regex`), `"csv"` (cột `domain` + một trong `rel`/`file`/`file_stem`/`record_id`);
+  gộp/đổi tên miền bằng `cfg.domain_alias`;
+- nếu vẫn chỉ có một miền: **in chẩn đoán** (ví dụ đường dẫn, ký hiệu còn lại trong tên tệp, biểu đồ chuỗi thu,
+  danh sách dataset trong `/kaggle/input` có `leak/`+`noleak/`), **ghi `domain_map_template.csv`** để gán miền bằng tay,
+  rồi dừng với 4 cách khắc phục cụ thể.
 
 ### 2.3 Nguồn gây dịch chuyển miền có thể có trong bài toán này
 
@@ -275,6 +287,11 @@ cùng cấu hình. Bảng `training_cost` cho thời gian thực đo để hiệ
    - bảng kiểm kê miền × lớp (mục 2.4) — mỗi miền đích cần ≥ 2 bản ghi mỗi lớp.
    Nếu miền nhận sai: sửa `cfg.domain_source`, `cfg.domain_regex` / `cfg.domain_csv`, `cfg.domain_alias`,
    `cfg.exclude_domains` hoặc khai báo tay `cfg.tasks`.
+   **Nếu tập Mix chỉ có một miền** (notebook dừng ở mục 2.3 với chẩn đoán): `Add Data` thêm dataset thứ hai (ví dụ
+   `tapdulieutt-8k-v7-2`) rồi đặt
+   `cfg.domain_roots = {"mix": "tapdulieuMix_16k", "field": "field_rec_8k_V7.2"}` (tên thư mục là đủ; notebook tự tìm
+   trong `/kaggle/input`). Khi hai dataset có chung bản ghi (cùng một lần thu ở 8 kHz và 16 kHz), mục 3.6 sẽ báo trùng —
+   phải loại trước khi báo cáo.
 5. `Run All` (hoặc `Save Version → Save & Run All` để chạy nền). Tải `/kaggle/working/ada_paper_artifacts.zip`.
 6. Chạy thử ngoài Kaggle (CPU, dữ liệu mô phỏng):
    `LEAK_OUT=/tmp/ada_smoke python tools/run_smoke.py notebooks/leak-ada-dann-kaggle-v1.ipynb`.
@@ -337,6 +354,7 @@ Acquisition Domains: A Leakage-Free, Recording-Level Evaluation*.
 |---|---|
 | Chạy end-to-end chế độ smoke (CPU, dữ liệu mô phỏng hai miền `lab`/`field`, `LEAK_SMOKE=1`) | 42/42 cell code chạy hết (~5.5 phút), sinh 23 hình + 19 bảng + văn bản nháp |
 | Chạy kiểm tra dài hơn (400 vòng lặp/job, 48 bản ghi mô phỏng) cho source-only, DANN, CDAN+E, CORAL, oracle | Mất mát phân lớp hội tụ; bộ phân biệt miền của DANN/CDAN+E dao động quanh mức ngẫu nhiên (L_d ≈ ln 2, độ chính xác 0.35–0.55) → GRL hoạt động; AUC frame đích của source-only giảm dần (0.98 → 0.69) trong khi DANN (0.93), CORAL (0.97) giữ được |
+| Nhận diện miền trên 7 cấu hình mô phỏng | `folder`, `label_folder`, `filename`, `bandwidth`, `domain_roots`, `csv`, `regex` đều nhận đúng 2 miền; tập một miền dừng với chẩn đoán + `domain_map_template.csv` |
 | Kiểm thử đơn vị trong notebook | GRL đảo dấu gradient đúng hệ số; CORAL/MMD = 0 với hai phân bố trùng nhau; kích thước ánh xạ CDAN; trọng số entropy chuẩn hoá đúng |
 | 5 assertion phân hoạch | Đạt cho mọi bài toán × seed |
 

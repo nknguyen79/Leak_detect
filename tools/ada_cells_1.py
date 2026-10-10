@@ -68,9 +68,10 @@ Notebook này đo mức dịch chuyển đó, rồi áp dụng **thích ứng mi
 
 > **Cách dùng nhanh / Quick start**
 > 1. Tải thư mục `tapdulieuMix_16k` lên Kaggle (`Datasets → New dataset`), rồi `Add Data` vào notebook.
-> 2. Cấu trúc khuyến nghị: `tapdulieuMix_16k/<miền>/<leak|noleak>/Rxxx_*.wav`
->    (hoặc `tapdulieuMix_16k/<leak|noleak>/<miền>/...`). Notebook **tự dò** miền từ thư mục; nếu miền nằm trong tên tệp
->    hay trong một CSV, chỉnh `cfg.domain_source` ở mục 1.2.
+> 2. Notebook **tự dò** miền: thư mục `<miền>/<leak|noleak>/`, thư mục ghép `leak_16k/`, ký hiệu trong tên tệp
+>    (`ptn_R001_leak01.wav`) hoặc chuỗi thu 8/16 kHz đo từ phổ. Nếu tập Mix chỉ là **một** miền, gắn thêm dataset thứ hai
+>    và đặt `cfg.domain_roots = {"mix": "...tapdulieuMix_16k", "field": "...field_rec_8k_V7.2"}`. Không dò được → mục 2.3
+>    in chẩn đoán + tạo `domain_map_template.csv` để gán miền bằng tay (`cfg.domain_source="csv"`).
 > 3. **Kiểm tra mục 2.3–2.4** (miền nào được nhận ra, mỗi miền bao nhiêu bản ghi mỗi lớp) trước khi để chạy hết.
 > 4. `Settings → Accelerator = GPU T4 x2`, rồi `Run All`. Cấu hình mặc định ~1.5–3 giờ tuỳ kích thước dữ liệu.
 >    Không tìm thấy dữ liệu → notebook tự sinh **dữ liệu mô phỏng hai miền** (SYNTHETIC DEMO MODE).
@@ -216,17 +217,28 @@ class CFG:
     strict_checks: bool = True                 # dừng khi có mâu thuẫn nhãn
 
     # ---- MIỀN / Domains ------------------------------------------------------
-    # auto  : thư mục (không phải leak/noleak) gần gốc nhất trên đường dẫn tương đối = miền;
-    #         nếu không có, thử domain_regex trên đường dẫn.
-    # folder: chỉ dùng thư mục | regex: chỉ dùng domain_regex | csv: tệp 2 cột record_id,domain
+    # domain_roots: MỖI DATASET MỘT MIỀN, ví dụ tập Mix + tập hiện trường v7:
+    #   {"mix": "/kaggle/input/.../tapdulieuMix_16k", "field": "/kaggle/input/.../field_rec_8k_V7.2"}
+    #   (chỉ cần đúng TÊN thư mục cuối nếu không chắc đường dẫn đầy đủ). Rỗng -> một dataset, miền tự dò.
+    domain_roots: dict = field(default_factory=dict)
+    # domain_source (khi không dùng domain_roots):
+    #   auto         : thử lần lượt regex (nếu đặt) -> folder -> label_folder -> filename -> bandwidth (mục 2.3)
+    #   folder       : thư mục không phải nhãn            tapdulieuMix_16k/<miền>/leak/...
+    #   label_folder : phần còn lại của thư mục nhãn      leak_16k/, noleak_tt/        -> "16k", "tt"
+    #   filename     : phần còn lại của tên tệp           lab_R001_leak01.wav          -> "lab"
+    #   bandwidth    : chuỗi thu 8 kHz vs 16 kHz đo từ phổ (tệp 8 kHz nâng lên 16 kHz)
+    #   regex        : domain_regex trên đường dẫn tương đối | csv: bảng gán miền (cột domain + rel/file/file_stem/record_id)
     domain_source: str = "auto"
-    domain_depth: int = 1                      # số cấp thư mục ghép thành tên miền
-    domain_regex: str = ""                     # ví dụ r"^(lab|field)_" trên tên tệp/đường dẫn
+    domain_depth: int = 1                      # số cấp thư mục ghép thành tên miền (cách "folder")
+    domain_regex: str = ""                     # ví dụ r"(?:^|/)(ptn|tt)_" trên đường dẫn tương đối (nhóm 1 = miền)
     domain_regex_group: int = 1
     domain_csv: str = ""
-    domain_alias: dict = field(default_factory=dict)   # gộp/đổi tên miền, ví dụ {"ptn": "lab"}
+    domain_alias: dict = field(default_factory=dict)   # gộp/đổi tên miền, ví dụ {"ptn": "lab", "unnamed": "field"}
     exclude_domains: tuple = ()
     min_records_per_class: int = 2             # miền cần >= ngần này bản ghi MỖI lớp để làm đích
+    max_auto_domains: int = 6                  # cách tự dò cho > ngần này miền bị coi là không hợp lệ
+    bw_split_db: float = -30.0                 # ngưỡng chuỗi thu (cách "bandwidth"); xem biểu đồ chẩn đoán
+    derivative_markers: tuple = ("_aug", "_augment", "_events_removed", "_clean", "_denois", "_copy", "_dup")
 
     # ---- Bài toán chuyển miền / Transfer tasks -------------------------------
     # () = tự động: 2 miền -> A→B và B→A; >2 miền -> leave-one-domain-out (các miền còn lại → miền giữ lại)
@@ -489,7 +501,7 @@ Ba định danh được trích cho **mỗi tệp**:
 | Định danh | Nguồn | Vai trò |
 |---|---|---|
 | `label` | thư mục `leak/` / `noleak/` (ưu tiên), rồi tên tệp | nhãn mức bản ghi |
-| `domain` | thư mục không phải nhãn trên đường dẫn tương đối (hoặc regex / CSV) | miền thu âm |
+| `domain` | `cfg.domain_roots` (mỗi dataset một miền) **hoặc** tự dò: thư mục miền → phần còn lại của thư mục nhãn (`leak_16k/`) → ký hiệu trong tên tệp → chuỗi thu 8/16 kHz (hoặc regex / CSV) | miền thu âm |
 | `record_uid = domain\|Rxxx` | mã `Rxxx` trong tên tệp **ghép với miền** | **đơn vị nhóm và đơn vị thống kê** |
 
 > Ghép miền vào mã bản ghi là bắt buộc: tập *Mix* có thể chứa `R001` ở cả hai miền nhưng là hai lần thu khác nhau.
@@ -500,6 +512,7 @@ Ba định danh được trích cho **mỗi tệp**:
 code(r'''
 # =========================================================
 # 2.1 Gán nhãn theo từ + dò thư mục dữ liệu / Word-level labelling and dataset discovery
+#     Hỗ trợ NHIỀU dataset = nhiều miền qua cfg.domain_roots (ví dụ tập Mix + tập hiện trường v7).
 # =========================================================
 def _norm_token(s):
     s = unicodedata.normalize("NFD", str(s))
@@ -532,7 +545,7 @@ def label_from_rel(rel):
 
 for _t, _w in [("leak", 1), ("noleak", 0), ("No-Leak", 0), ("R001_leak01", 1), ("R12_noleak_03", 0),
                ("rò_rỉ", 1), ("khong_ro_ri", 0), ("leakage", None), ("tapdulieuMix_16k", None),
-               ("field", None), ("lab", None)]:
+               ("field", None), ("lab", None), ("leak_16k", 1), ("noleak_tt", 0)]:
     assert _label_of_token(_t) == _w, f"bộ gán nhãn sai với '{_t}'"
 
 def _audio_in(root):
@@ -541,6 +554,22 @@ def _audio_in(root):
 def _has_both(root, files):
     labs = {label_from_rel(p.relative_to(root))[0] for p in files}
     return {0, 1}.issubset(labs)
+
+_BASES = [b for b in (Path("/kaggle/input"), Path("./data")) if b.exists()]
+_key = lambda s: re.sub(r"[^a-z0-9]", "", str(s).lower())   # Kaggle: "tapdulieuMix_16k" -> slug "tapdulieumix-16k"
+
+def find_dir(path_or_name):
+    # Đường dẫn tồn tại -> dùng luôn; nếu không, tìm thư mục cùng TÊN (bỏ qua hoa/thường, ký tự đặc biệt)
+    p = Path(str(path_or_name))
+    if str(path_or_name) and p.exists():
+        return p
+    for base in _BASES:
+        for d in sorted(base.rglob("*")):
+            if d.is_dir() and _key(d.name) == _key(p.name):
+                fs = _audio_in(d)
+                if fs and _has_both(d, fs):
+                    return d
+    return None
 
 def discover_root(explicit="", hint=""):
     if explicit:
@@ -552,36 +581,64 @@ def discover_root(explicit="", hint=""):
             print(f"!! cfg.data_root = {ex} tồn tại nhưng không chứa đủ hai lớp leak/noleak.")
         else:
             print(f"!! cfg.data_root = {ex} KHÔNG tồn tại -> tự dò.")
-    bases = [b for b in (Path("/kaggle/input"), Path("./data")) if b.exists()]
-    # (1) thư mục trùng tên gợi ý (bỏ qua hoa/thường và ký tự không phải chữ-số: Kaggle đổi
-    #     "tapdulieuMix_16k" thành slug "tapdulieumix-16k")
-    _key = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
-    if hint:
-        for base in bases:
-            for d in sorted(base.rglob("*")):
-                if d.is_dir() and _key(d.name) == _key(hint):
-                    fs = _audio_in(d)
-                    if fs and _has_both(d, fs):
-                        return d, fs
-    # (2) tổ tiên chung thấp nhất của mọi tệp âm thanh có nhãn
-    for base in bases:
+    if hint:                                                # (1) thư mục trùng tên gợi ý
+        d = find_dir(hint)
+        if d is not None:
+            return d, _audio_in(d)
+    for base in _BASES:                                     # (2) tổ tiên chung thấp nhất của mọi tệp có nhãn
         fs = [p for p in _audio_in(base) if label_from_rel(p.relative_to(base))[0] is not None]
         if fs and _has_both(base, fs):
             root = Path(os.path.commonpath([str(p.parent) for p in fs]))
-            while _label_of_token(root.name) is not None:      # không lấy chính thư mục leak/
+            while _label_of_token(root.name) is not None:
                 root = root.parent
             return root, _audio_in(root)
     return None, []
 
-DATA_ROOT, AUDIO_FILES = discover_root(cfg.data_root, cfg.dataset_hint)
-SYNTHETIC = DATA_ROOT is None
+def candidate_dataset_roots(max_depth=5):
+    # Mọi thư mục trong /kaggle/input có thư mục con leak/ VÀ noleak/ -> gợi ý cho cfg.domain_roots
+    out = []
+    for base in _BASES:
+        stack = [(base, 0)]
+        while stack:
+            d, k = stack.pop()
+            try:
+                kids = [x for x in d.iterdir() if x.is_dir()]
+            except Exception:
+                continue
+            if {0, 1}.issubset({_label_of_token(x.name) for x in kids}):
+                out.append(d)
+            if k < max_depth:
+                stack += [(x, k + 1) for x in kids]
+    return sorted(out)
+
+# ROOTS: danh sách (tên miền cố định hoặc None, thư mục gốc, danh sách tệp)
+ROOTS = []
+if cfg.domain_roots:
+    for _name, _pth in cfg.domain_roots.items():
+        _d = find_dir(_pth)
+        if _d is None:
+            print(f"!! Không tìm thấy thư mục của miền '{_name}': {_pth}")
+            print("   Các thư mục trong /kaggle/input có leak/ + noleak/ (chép đường dẫn đúng vào cfg.domain_roots):")
+            for _c in candidate_dataset_roots():
+                print("     ", _c)
+            raise FileNotFoundError(f"cfg.domain_roots['{_name}'] = {_pth} không tồn tại")
+        _fs = _audio_in(_d)
+        assert _fs and _has_both(_d, _fs), f"Miền '{_name}' ({_d}) không có đủ hai lớp leak/noleak"
+        ROOTS.append((str(_name), _d, _fs))
+        print(f"Miền '{_name}': {_d} | {len(_fs)} tệp")
+    DATA_ROOT, AUDIO_FILES, SYNTHETIC = ROOTS[0][1], [p for r in ROOTS for p in r[2]], False
+else:
+    DATA_ROOT, AUDIO_FILES = discover_root(cfg.data_root, cfg.dataset_hint)
+    SYNTHETIC = DATA_ROOT is None
+    if not SYNTHETIC:
+        ROOTS = [(None, DATA_ROOT, AUDIO_FILES)]
 if SYNTHETIC:
     print("!! KHÔNG tìm thấy dataset -> SYNTHETIC DEMO MODE (dữ liệu mô phỏng hai miền).")
 else:
     print("Dataset root:", DATA_ROOT, "|", len(AUDIO_FILES), "tệp âm thanh")
 
 def print_tree(root, max_depth=3, max_children=12):
-    # Cây thư mục kèm số tệp âm thanh -> giúp cấu hình cfg.domain_source khi tự dò sai.
+    # Cây thư mục kèm số tệp âm thanh -> giúp cấu hình miền khi tự dò sai.
     root = Path(root)
     def _walk(d, depth):
         kids = sorted(k for k in d.iterdir() if k.is_dir())
@@ -601,10 +658,10 @@ code(r'''
 # 2.2 Dữ liệu mô phỏng HAI MIỀN / Two-domain synthetic data (chỉ khi không có dữ liệu thật)
 #     "lab"  : nền nhiễu hồng, rò rỉ băng hẹp 350-900 Hz SNR cao, băng thông đầy đủ 8 kHz.
 #     "field": nền nhiễu nâu + xe cộ + bơm, rò rỉ yếu hơn & dịch xuống 250-700 Hz, cảm biến có
-#              độ dốc phổ khác, băng thông 3.8 kHz (mô phỏng chuỗi thu 8 kHz nâng lên 16 kHz),
+#              độ dốc phổ khác, chuỗi thu 8 kHz nâng lên 16 kHz (không có năng lượng > 4 kHz),
 #              tỉ lệ lớp khác "lab" (dịch chuyển nhãn), mã Rxxx TRÙNG với "lab".
 # =========================================================
-def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0):
+def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0, layout="folder"):
     rng = np.random.default_rng(seed)
     root = Path(root)
     if root.exists():
@@ -620,13 +677,27 @@ def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0):
         return np.fft.irfft(X / f ** (alpha / 2), n)
 
     prof = {"lab": dict(alpha=1.0, snr=(-2, 8), f0=(350, 900), bw=(80, 200), hum=0.02,
-                        tr=(0, 2), pump=0.0, lp=None, tilt=0.0),
+                        tr=(0, 2), pump=0.0, chain8k=False, tilt=0.0),
             "field": dict(alpha=1.6, snr=(-8, 2), f0=(250, 700), bw=(60, 160), hum=0.08,
-                          tr=(3, 7), pump=0.5, lp=3800.0, tilt=0.6)}
-    for dom, n_leak, n_no in spec:
-        P = prof[dom]; rid = 0
+                          tr=(3, 7), pump=0.5, chain8k=True, tilt=0.6)}
+
+    def _dst(dom, cls, rid, seg):
+        name = f"R{rid:03d}_{cls}{seg:02d}.wav"
+        if layout == "labelfolder":
+            d = root / f"{cls}_{dom}"
+        elif layout == "filename":
+            d, name = root / cls, f"{dom}_{name}"
+        elif layout == "bandwidth":
+            d = root / cls
+        else:                                                           # folder, roots
+            d = root / dom / cls
+        d.mkdir(parents=True, exist_ok=True)
+        return d / name
+
+    for di, (dom, n_leak, n_no) in enumerate(spec):
+        P = prof[dom]
+        rid = 100 * di if layout == "bandwidth" else 0                  # thư mục phẳng: tránh trùng tên tệp
         for cls, n_r in (("leak", n_leak), ("noleak", n_no)):
-            (root / dom / cls).mkdir(parents=True, exist_ok=True)
             for _ in range(n_r):
                 rid += 1
                 f0 = rng.uniform(*P["f0"]); bw = rng.uniform(*P["bw"])
@@ -647,34 +718,47 @@ def _synthesise_mixed(root, spec, files_per_rec=2, dur=24.0, sr=16000, seed=0):
                         x[s0:s0 + sr] += 3.0 * np.exp(-np.arange(sr) / (sr * .05)) * rng.standard_normal(sr)
                     if P["tilt"]:
                         x = sps.lfilter([1 - P["tilt"]], [1, -P["tilt"]], x)
-                    if P["lp"]:
-                        b, a = sps.butter(8, P["lp"] / (sr / 2)); x = sps.filtfilt(b, a, x)
+                    if P["chain8k"]:                                     # thu 8 kHz rồi nâng lên 16 kHz
+                        x = sps.resample_poly(sps.resample_poly(x, 1, 2), 2, 1)[:n]
                     x = x / (np.max(np.abs(x)) + 1e-9) * 0.9
-                    sf.write(root / dom / cls / f"R{rid:03d}_{cls}{seg:02d}.wav", x.astype(np.float32), sr)
+                    sf.write(_dst(dom, cls, rid, seg), x.astype(np.float32), sr)
     return root
 
 if SYNTHETIC:
-    if cfg.smoke_test:
-        _spec, _fpr, _dur = (("lab", 5, 4), ("field", 4, 5)), 1, 12.0
-    else:
-        _spec, _fpr, _dur = (("lab", 14, 10), ("field", 10, 14)), 2, 24.0
-    DATA_ROOT = _synthesise_mixed(OUT / "synthetic_mix_16k", _spec, _fpr, _dur, cfg.target_sr)
+    # LEAK_SYN_LAYOUT chọn bố cục thư mục mô phỏng để kiểm thử bộ nhận miền:
+    #   folder (mặc định) <miền>/<lớp>/ | labelfolder <lớp>_<miền>/ | filename <lớp>/<miền>_Rxxx...
+    #   bandwidth <lớp>/ phẳng, miền chỉ khác chuỗi thu | roots: mỗi miền một thư mục gốc | single: 1 miền
+    _layout = os.environ.get("LEAK_SYN_LAYOUT", "folder")
+    _n = (5, 4) if cfg.smoke_test else (14, 10)
+    _spec = ((("lab",) + _n),) if _layout == "single" else (("lab",) + _n, ("field",) + _n[::-1])
+    _fpr, _dur = (1, 12.0) if cfg.smoke_test else (2, 24.0)
+    DATA_ROOT = _synthesise_mixed(OUT / "synthetic_mix_16k", _spec, _fpr, _dur, cfg.target_sr,
+                                  layout="bandwidth" if _layout == "single" else _layout)
     AUDIO_FILES = _audio_in(DATA_ROOT)
-    print("Synthetic dataset:", DATA_ROOT, "|", len(AUDIO_FILES), "tệp")
+    ROOTS = ([(d, DATA_ROOT / d, _audio_in(DATA_ROOT / d)) for d in ("lab", "field")] if _layout == "roots"
+             else [(None, DATA_ROOT, AUDIO_FILES)])
+    print(f"Synthetic dataset ({_layout}):", DATA_ROOT, "|", len(AUDIO_FILES), "tệp")
 
-print_tree(DATA_ROOT)
+for _name, _root, _ in ROOTS:
+    if _name:
+        print(f"\n[miền '{_name}']")
+    print_tree(_root)
 ''')
 
 code(r'''
 # =========================================================
-# 2.3 Bảng kiểm kê mức TỆP: nhãn, MIỀN, mã bản ghi / File-level manifest
+# 2.3 Bảng kiểm kê mức TỆP + NHẬN DIỆN MIỀN / File-level manifest and domain assignment
+#     cfg.domain_source = "auto" thử lần lượt các cách dưới đây và lấy cách ĐẦU TIÊN cho >= 2 miền
+#     hợp lệ (mỗi miền >= 2 bản ghi, >= 2 miền có đủ hai lớp, >= 1 miền đủ điều kiện làm đích):
+#       regex        : cfg.domain_regex trên đường dẫn tương đối (nếu được đặt)
+#       folder       : thư mục KHÔNG phải nhãn          tapdulieuMix_16k/<miền>/leak/...
+#       label_folder : phần còn lại của thư mục nhãn    leak_16k/, noleak_tt/       -> "16k", "tt"
+#       filename     : phần còn lại của tên tệp         lab_R001_leak01.wav         -> "lab"
+#       bandwidth    : chuỗi thu đo từ phổ (năng lượng 5-7.5 kHz so với 2.5-3.5 kHz) -> chain_8k / chain_16k
+#     cfg.domain_roots (mỗi dataset một miền) và "csv" (bảng gán miền theo tệp) luôn được ưu tiên.
 # =========================================================
 _REC_RE = re.compile(cfg.record_regex, re.IGNORECASE)
-DOMAIN_CSV_MAP = {}
-if cfg.domain_source == "csv":
-    _dm = pd.read_csv(cfg.domain_csv)
-    assert {"record_id", "domain"}.issubset(_dm.columns), "CSV miền cần 2 cột: record_id, domain"
-    DOMAIN_CSV_MAP = {str(a).strip().upper(): str(b).strip() for a, b in zip(_dm.record_id, _dm.domain)}
+_DERIV = tuple(_norm_token(m).strip("_") for m in cfg.derivative_markers)
 
 def extract_record_id(path):
     m = _REC_RE.search(path.stem)
@@ -685,78 +769,207 @@ def extract_record_id(path):
         return m.group(1).upper(), "regex:parent"
     return path.stem, "fallback:stem"
 
-def _domain_by_regex(rel):
-    if not cfg.domain_regex:
-        return None
-    m = re.search(cfg.domain_regex, str(rel), re.IGNORECASE)
-    return m.group(cfg.domain_regex_group) if m else None
+def _residual(s, drop_rid=False):
+    # Bỏ từ nhãn (leak/noleak...), mã Rxxx, số thứ tự, đánh dấu tệp dẫn xuất -> phần còn lại = ứng viên miền.
+    s = _LEAK_RE.sub("_", _NOLEAK_RE.sub("_", _norm_token(s)))
+    if drop_rid:
+        s = _REC_RE.sub("_", s)
+    for m in _DERIV:
+        s = s.replace(m, "_")
+    toks = []
+    for t in re.split(r"[_.\s]+", s):
+        if not t or t.isdigit():
+            continue
+        if re.fullmatch(r"[a-z]+\d+", t):            # seg01 -> seg ; giữ 16k, 8k
+            t = re.sub(r"\d+$", "", t)
+        toks.append(t)
+    return "_".join(toks)
 
 def _domain_dirs(rel):
     return [d for d in Path(rel).parts[:-1] if _label_of_token(d) is None]
 
-# Bỏ các thư mục "bọc" chung cho MỌI tệp (ví dụ tapdulieuMix_16k/data/<miền>/...) trước khi lấy miền
-_all_dirs = [_domain_dirs(p.relative_to(DATA_ROOT)) for p in AUDIO_FILES
-             if label_from_rel(p.relative_to(DATA_ROOT))[0] is not None]
-WRAP_DEPTH = 0
-while _all_dirs and all(len(d) > WRAP_DEPTH + 1 for d in _all_dirs) and \
-        len({d[WRAP_DEPTH] for d in _all_dirs}) == 1:
-    WRAP_DEPTH += 1
-if WRAP_DEPTH:
-    print(f"Bỏ {WRAP_DEPTH} cấp thư mục chung trước khi đọc tên miền: {'/'.join(_all_dirs[0][:WRAP_DEPTH])}/")
-
-def extract_domain(rel, rid):
-    if cfg.domain_source == "csv":
-        return DOMAIN_CSV_MAP.get(str(rid).upper()), "csv"
-    if cfg.domain_source == "regex":
-        return _domain_by_regex(rel), "regex"
-    dirs = _domain_dirs(rel)[WRAP_DEPTH:]
-    if dirs:
-        return "/".join(dirs[:cfg.domain_depth]), "folder"
-    if cfg.domain_source == "auto":
-        d = _domain_by_regex(rel)
-        if d:
-            return d, "regex"
-    return "all", "none"
-
-rows = []
-for p_ in AUDIO_FILES:
-    rel = p_.relative_to(DATA_ROOT)
-    lab, tok = label_from_rel(rel)
-    if lab is None:
-        continue
+def chain_hf_db(path, max_sec=20.0):
+    # Trung vị PSD 5-7.5 kHz so với 2.5-3.5 kHz (dB) — tránh dải chuyển tiếp của bộ lọc chống chồng phổ
+    # quanh 4 kHz. Thu 8 kHz rồi nâng lên 16 kHz: thường < -60 dB; thu gốc 16 kHz: thường > -10 dB.
     try:
-        info = sf.info(str(p_))
-    except Exception as e:
-        print("  [bỏ qua]", rel, type(e).__name__); continue
-    rid, how = extract_record_id(p_)
-    dom, dsrc = extract_domain(rel, rid)
-    if dom is None:
-        print("  [không xác định miền]", rel); continue
-    dom = cfg.domain_alias.get(dom, dom)
-    rows.append(dict(path=str(p_), rel=str(rel), file_stem=p_.stem, domain=dom, domain_source=dsrc,
-                     record_id=rid, rid_source=how, record_uid=f"{dom}|{rid}",
-                     label=int(lab), cls="leak" if lab == 1 else "noleak", label_token=tok,
-                     duration_s=float(info.duration), sr_native=int(info.samplerate),
-                     channels=int(info.channels)))
+        info = sf.info(str(path)); sr = int(info.samplerate)
+        if sr < 12000:
+            return -120.0
+        x, _ = sf.read(str(path), frames=int(min(info.frames, max_sec * sr)), dtype="float32", always_2d=True)
+        x = x.mean(1); x = x - x.mean()
+        f, P = sps.welch(x, fs=sr, nperseg=min(4096, len(x)))
+        hi = np.median(P[(f >= 5000) & (f <= min(7500, sr / 2 - 200))])
+        lo = np.median(P[(f >= 2500) & (f <= 3500)])
+        return float(10 * np.log10((hi + 1e-30) / (lo + 1e-30)))
+    except Exception:
+        return np.nan
 
+# ---- Lượt 1: nhãn, mã bản ghi, thông tin tệp (chưa gán miền) ----
+rows = []
+for _name, _root, _fs in ROOTS:
+    for p_ in _fs:
+        rel = p_.relative_to(_root)
+        lab, tok = label_from_rel(rel)
+        if lab is None:
+            continue
+        try:
+            info = sf.info(str(p_))
+        except Exception as e:
+            print("  [bỏ qua]", rel, type(e).__name__); continue
+        rid, how = extract_record_id(p_)
+        rows.append(dict(path=str(p_), root=str(_root), fixed_domain=_name, rel=str(rel), file_stem=p_.stem,
+                         record_id=rid, rid_source=how, label=int(lab), cls="leak" if lab == 1 else "noleak",
+                         label_token=tok, duration_s=float(info.duration), sr_native=int(info.samplerate),
+                         channels=int(info.channels)))
 files = pd.DataFrame(rows)
 assert len(files), "Không đọc được tệp âm thanh nào."
+
+# ---- Các cách gán miền ----
+def cand_folder(df):
+    dirs = [_domain_dirs(r) for r in df.rel]
+    w = 0                                            # bỏ các thư mục "bọc" chung cho mọi tệp
+    while dirs and all(len(d) > w + 1 for d in dirs) and len({d[w] for d in dirs}) == 1:
+        w += 1
+    return pd.Series(["/".join(d[w:w + cfg.domain_depth]) for d in dirs], index=df.index)
+
+def cand_label_folder(df):
+    out = []
+    for r in df.rel:
+        labdirs = [p for p in Path(r).parts[:-1] if _label_of_token(p) is not None]
+        out.append(_residual(labdirs[-1]) if labdirs else "")
+    return pd.Series(out, index=df.index)
+
+def cand_filename(df):
+    return pd.Series([_residual(Path(r).stem, drop_rid=True) for r in df.rel], index=df.index)
+
+def cand_regex(df):
+    def one(r):
+        m = re.search(cfg.domain_regex, str(r), re.IGNORECASE)
+        return m.group(cfg.domain_regex_group) if m else ""
+    return pd.Series([one(r) for r in df.rel], index=df.index)
+
+_HF_DB = {}
+def cand_bandwidth(df):
+    if not _HF_DB:
+        t0 = time.time()
+        for p in df.path:
+            _HF_DB[p] = chain_hf_db(p)
+        print(f"  (đo chuỗi thu của {len(df)} tệp trong {time.time() - t0:.0f}s)")
+    v = df.path.map(_HF_DB)
+    lab = pd.Series(np.where(v < cfg.bw_split_db, "chain_8k", "chain_16k"), index=df.index).where(v.notna(), "")
+    # một bản ghi (gốc × lớp × Rxxx) phải thuộc MỘT chuỗi thu -> lấy đa số
+    key = df.root + "|" + df.cls + "|" + df.record_id
+    maj = lab.groupby(key).agg(lambda s: s.value_counts().index[0])
+    n_mixed = int((lab.groupby(key).nunique() > 1).sum())
+    if n_mixed:
+        print(f"  !! {n_mixed} bản ghi có tệp thuộc hai chuỗi thu khác nhau -> gán theo đa số")
+    return key.map(maj)
+
+def cand_csv(df):
+    dm = pd.read_csv(cfg.domain_csv)
+    keycol = next((c for c in ("rel", "file", "file_stem", "record_id") if c in dm.columns), None)
+    assert "domain" in dm.columns and keycol, "CSV miền cần cột 'domain' và một trong: rel, file, file_stem, record_id"
+    dm = dm[dm.domain.notna() & (dm.domain.astype(str).str.strip() != "")]
+    nk = lambda v: str(v).strip().replace("\\", "/").lower()
+    M = {nk(k): str(d).strip() for k, d in zip(dm[keycol], dm.domain)}
+    keys = {"rel": df.rel, "file": df.rel.map(lambda r: Path(r).name),
+            "file_stem": df.file_stem, "record_id": df.record_id}[keycol]
+    return keys.map(lambda k: M.get(nk(k), ""))
+
+CANDIDATES = {"regex": cand_regex, "folder": cand_folder, "label_folder": cand_label_folder,
+              "filename": cand_filename, "bandwidth": cand_bandwidth, "csv": cand_csv}
+
+def assess(dom, df):
+    d = dom.replace("", "unnamed")
+    rec = (df.assign(d=d).groupby(["d", "label"]).record_id.nunique().unstack(fill_value=0)
+           .reindex(columns=[0, 1], fill_value=0))
+    both = int(((rec[0] >= 1) & (rec[1] >= 1)).sum())
+    elig = int(((rec[0] >= cfg.min_records_per_class) & (rec[1] >= cfg.min_records_per_class)).sum())
+    ok = (2 <= len(rec) <= cfg.max_auto_domains and both >= 2 and elig >= 1 and bool((rec.sum(1) >= 2).all()))
+    return ok, d, rec
+
+free = files.fixed_domain.isna()
+files["domain"] = files.fixed_domain.fillna("")
+files["domain_source"] = np.where(free, "", "root")
+CAND_REPORT, chosen = [], None
+if free.any():
+    sub = files[free]
+    if cfg.domain_source in ("csv", "regex", "folder", "label_folder", "filename", "bandwidth"):
+        order = [cfg.domain_source]
+    else:
+        order = (["regex"] if cfg.domain_regex else []) + ["folder", "label_folder", "filename", "bandwidth"]
+    for meth in order:
+        dom = CANDIDATES[meth](sub)
+        ok, d, rec = assess(dom, sub)
+        vals = ", ".join(f"{k} ({int(r[0])} noleak/{int(r[1])} leak)" for k, r in rec.head(8).iterrows())
+        CAND_REPORT.append(dict(method=meth, n_domains=len(rec), valid=ok, domains=vals))
+        if ok or cfg.domain_source != "auto":
+            chosen = meth
+            # với cách khai báo tay, tệp không gán được miền bị LOẠI (không gộp vào "unnamed")
+            files.loc[sub.index, "domain"] = (d if cfg.domain_source == "auto" else dom).values
+            files.loc[sub.index, "domain_source"] = meth
+            break
+    if chosen is None:                                 # một miền duy nhất -> cờ "all" để mục chẩn đoán xử lý
+        files.loc[sub.index, "domain"] = "all"; files.loc[sub.index, "domain_source"] = "none"
+display(pd.DataFrame(CAND_REPORT)) if CAND_REPORT else None
+print("Cách gán miền được dùng:", chosen or ("domain_roots" if not free.any() else "KHÔNG CÓ"))
+
+n_drop = int((files.domain == "").sum())
+if n_drop:
+    print(f"!! {n_drop} tệp không gán được miền theo '{cfg.domain_source}' -> loại khỏi phân tích.")
+files = files[files.domain != ""].copy()
+files["domain"] = files.domain.map(lambda d: cfg.domain_alias.get(d, d))
 if cfg.exclude_domains:
-    files = files[~files.domain.isin(cfg.exclude_domains)].reset_index(drop=True)
+    files = files[~files.domain.isin(cfg.exclude_domains)]
+files["record_uid"] = files.domain + "|" + files.record_id
 files = files.sort_values(["domain", "cls", "record_uid", "file_stem"]).reset_index(drop=True)
 files["file_id"] = np.arange(len(files))
 files.to_csv(OUT / "manifest_files.csv", index=False)
 
 print(f"Số tệp: {len(files)} | số miền: {files.domain.nunique()} -> {sorted(files.domain.unique())}")
-print("Nguồn xác định miền:", files.domain_source.value_counts().to_dict())
 print("Trích mã bản ghi   :", files.rid_source.value_counts().to_dict())
-print("Tần số lấy mẫu gốc :", files.groupby("domain").sr_native.agg(lambda s: sorted(set(s))).to_dict())
+print("Tần số lấy mẫu gốc :", files.groupby("domain").sr_native.agg(lambda s: str(sorted(set(s)))).to_dict())
 
 if files.domain.nunique() < 2:
-    print("\n!! CHỈ NHẬN RA MỘT MIỀN. Thích ứng miền cần ít nhất 2 miền. Cây thư mục ở trên cho thấy")
-    print("   cấu trúc thực tế; hãy đặt cfg.domain_source='regex' + cfg.domain_regex (miền nằm trong tên")
-    print("   tệp), hoặc 'csv' + cfg.domain_csv (bảng record_id,domain), rồi chạy lại từ mục 2.3.")
-    raise ValueError("Cần >= 2 miền cho thích ứng miền (xem hướng dẫn ngay trên).")
+    # ---------------- CHẨN ĐOÁN: vì sao không tách được miền ----------------
+    print("\n" + "=" * 100)
+    print("!! CHỈ NHẬN RA MỘT MIỀN — thích ứng miền cần ít nhất 2 miền. Thông tin để quyết định cách gán miền:")
+    print("=" * 100)
+    print("\n(1) Ví dụ đường dẫn tương đối (12 tệp mỗi lớp):")
+    for c in ("leak", "noleak"):
+        for r in files.loc[files.cls == c, "rel"].head(12):
+            print("     ", r)
+    print("\n(2) Phần còn lại của TÊN TỆP sau khi bỏ Rxxx/nhãn/số thứ tự (nếu có nhóm rõ ràng -> đó là miền):")
+    display(cand_filename(files).replace("", "(trống)").groupby(files.cls).value_counts().unstack(0).fillna(0)
+            .astype(int).sort_values("leak", ascending=False).head(15))
+    _db = cand_bandwidth(files)
+    v = files.path.map(_HF_DB)
+    fig, ax = plt.subplots(figsize=(8, 3.2))
+    for c in ("noleak", "leak"):
+        ax.hist(v[files.cls == c].dropna(), bins=40, alpha=.6, color=PAL[c], label=c)
+    ax.axvline(cfg.bw_split_db, color="k", ls="--", label=f"ngưỡng {cfg.bw_split_db:g} dB")
+    ax.set_xlabel("PSD 5–7.5 kHz so với 2.5–3.5 kHz (dB)"); ax.set_ylabel("số tệp"); ax.legend()
+    ax.set_title("(3) Chuỗi thu: hai cụm tách biệt = hai chuỗi thu (8 kHz / 16 kHz)")
+    savefig(fig, "domain_diagnostic_chain", "Diagnostic: acquisition-chain indicator per file.")
+    tmpl = files[["rel", "file_stem", "record_id", "cls", "duration_s"]].assign(
+        hf_db=v.round(1).values, suggested=_db.values, domain="")
+    tmpl.to_csv(OUT / "domain_map_template.csv", index=False)
+    print(f"\n(4) Đã ghi {OUT / 'domain_map_template.csv'}: điền cột 'domain' cho từng tệp nếu cần gán tay.")
+    print("\n(5) Các thư mục trong /kaggle/input có leak/ + noleak/ (có thể dùng làm MIỀN THỨ HAI):")
+    for d in candidate_dataset_roots():
+        print("      ", d)
+    print("""
+CÁCH KHẮC PHỤC (chọn một, sửa ở mục 1.2 rồi chạy lại từ đầu):
+  A. Tập Mix chỉ là MỘT miền -> thêm dataset thứ hai (ví dụ tập hiện trường v7) làm miền khác:
+       cfg.domain_roots = {"mix": "<đường dẫn tapdulieuMix_16k>", "field": "<đường dẫn field_rec_8k_V7.2>"}
+  B. Tên tệp có ký hiệu miền (ví dụ 'ptn_R001_leak01', 'R001_tt_leak01'):
+       cfg.domain_source = "regex"; cfg.domain_regex = r"(?:^|/)(ptn|tt)_"   (nhóm 1 = tên miền)
+  C. Biểu đồ (3) có hai cụm rõ ràng (dữ liệu 8 kHz và 16 kHz trộn lẫn):
+       cfg.domain_source = "bandwidth"   (chỉnh cfg.bw_split_db theo khe giữa hai cụm)
+  D. Không có quy luật nào ở trên: điền cột 'domain' trong domain_map_template.csv, tải lên Kaggle rồi
+       cfg.domain_source = "csv"; cfg.domain_csv = "/kaggle/input/<dataset>/domain_map_template.csv"
+""")
+    raise ValueError("Cần >= 2 miền cho thích ứng miền — xem chẩn đoán (1)-(5) và cách khắc phục A-D ngay trên.")
 files.head(6)
 ''')
 
