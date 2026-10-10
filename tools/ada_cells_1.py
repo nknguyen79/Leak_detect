@@ -1711,10 +1711,11 @@ if cfg.run_shortcut_check:
     for _, r in SHORTCUT.iterrows():
         w = np.nanmax(r[wcols].values.astype(float))
         x = np.nanmin(r[xcols].values.astype(float)) if xcols else np.nan
-        tag = ("ĐẶC THÙ MIỀN (nghi lối tắt)" if w >= 0.8 and x <= 0.6 else
-               "chuyển giao được" if np.nanmin(r[wcols].values.astype(float)) >= 0.65 and x >= 0.65 else "")
-        if tag:
-            print(f"  {r.region:<28s} trong miền max {w:.2f} | chéo miền min {x:.2f} -> {tag}")
+        tag = ("không đủ dữ liệu" if not (np.isfinite(w) and np.isfinite(x)) else
+               "ĐẶC THÙ MIỀN (nghi lối tắt)" if w >= 0.8 and x <= 0.6 else
+               "chuyển giao được" if np.nanmin(r[wcols].values.astype(float)) >= 0.65 and x >= 0.65 else
+               "ít thông tin" if w < 0.65 else "chuyển giao một phần")
+        print(f"  {r.region:<28s} trong miền max {w:.2f} | chéo miền min {x:.2f} -> {tag}")
     fig, ax = plt.subplots(figsize=(13, 4))
     xx = np.arange(len(SHORTCUT)); cols_ = wcols + xcols; w_ = .8 / len(cols_)
     shades = [DOMAIN_COLOR.get(c.replace("within ", ""), "#999999") for c in wcols] + ["#444444", "#AAAAAA"][:len(xcols)]
