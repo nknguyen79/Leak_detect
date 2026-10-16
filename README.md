@@ -9,6 +9,8 @@ Low-Pressure PVC Water Distribution Pipes Using Deep Convolutional Neural Networ
 | `notebooks/leak-cnn-pvc-kaggle-v6.ipynb` | Bản v6 gốc (kèm output của lần chạy trên 80 bản ghi) — nguồn để dựng v7. |
 | `tools/build_v7.py`, `tools/v7_cells.py` | Dựng v7 **tái lập được** từ v6: mỗi chỉnh sửa là một phép thay thế có kiểm tra. |
 | `tools/run_smoke.py` | Chạy end-to-end ở chế độ smoke (3 epoch, 2 fold, dữ liệu mô phỏng) để kiểm tra toàn tuyến. |
+| `notebooks/leak-da-pvc-hdpe-dann-coral-kaggle.ipynb` | **Thích nghi miền PVC → HDPE**: 1D/2D-CNN + GRL (DANN) + Deep CORAL, kèm AdaBN, few-shot, Oracle. |
+| `tools/build_da.py`, `tools/da_cells.py` | Dựng notebook thích nghi miền từ mã nguồn các cell (kiểm tra cú pháp từng cell). |
 
 ## Chạy
 
@@ -31,6 +33,31 @@ mô phỏng), `LEAK_OUT=<thư mục đầu ra>`.
 ```bash
 python tools/build_v7.py notebooks/leak-cnn-pvc-kaggle-v6.ipynb notebooks/leak-cnn-pvc-kaggle-v7.ipynb
 ```
+
+## Notebook thích nghi miền PVC → HDPE (DANN + Deep CORAL)
+
+Hiện thực tài liệu *domain_shift* và sơ đồ 4 giai đoạn (lệch miền → VMD + CWT + CNN/CBAM → GRL/CORAL →
+không gian bất biến). Miền nguồn = PVC có nhãn; miền đích = HDPE, nhãn **chỉ** dùng để đánh giá.
+
+| Thành phần | Nội dung |
+|---|---|
+| Tiền xử lý | 2 kHz, lọc dải 15–350 Hz, notch 50 Hz, VMD theo lô trên GPU, CWT Morlet tần số log (hoặc log-Mel), CMVN theo miền |
+| $G_f$ | `CNN2D` (CWT + 4 khối Conv2d + CBAM) và `CNN1D` (sóng thô, bộ lọc dải học được + CBAM-1D) |
+| Căn chỉnh | GRL với $\lambda_p = 2/(1+e^{-10p})-1$, bộ phân biệt miền $G_d$, Deep CORAL $\frac{1}{4d^2}\lVert C_S-C_T\rVert_F^2$ (tuỳ chọn Deep MMD) |
+| So sánh | Source-only, AdaBN, CORAL, DANN, **DANN+CORAL**, DANN+CORAL+PhysAug, Few-shot FT (LR 1e-4/1e-5/1e-3), Oracle |
+| Đánh giá | K-fold theo **bản ghi** HDPE (thích nghi không nhãn / kiểm thử tách rời), epoch cuối + ngưỡng 0,5 đăng ký trước, CI bootstrap theo bản ghi, ΔAUC ghép cặp + Holm, proxy A-distance / CORAL / MMD / t-SNE |
+
+Ba chế độ tự nhận diện: `real` (có `PVC/` và `HDPE/`), `physics_sim` (chỉ có PVC thật — ví dụ bộ v7 — miền
+đích giả lập bằng dịch tần Korteweg + suy hao nhớt đàn hồi trên các bản ghi PVC **tách rời**), `synthetic`.
+HDPE chưa có nhãn (`unlabeled/` hoặc `DA_HIDE_TARGET_LABELS=1`) → bỏ đánh giá, xuất mô hình + bảng xếp hạng bản ghi nghi rò.
+
+```bash
+python tools/build_da.py notebooks/leak-da-pvc-hdpe-dann-coral-kaggle.ipynb          # dựng lại sau khi sửa tools/da_cells.py
+LEAK_OUT=/tmp/da_smoke python tools/run_smoke.py notebooks/leak-da-pvc-hdpe-dann-coral-kaggle.ipynb
+DA_SOURCE=<thư mục PVC> LEAK_OUT=/tmp/da_sim python tools/run_smoke.py notebooks/leak-da-pvc-hdpe-dann-coral-kaggle.ipynb
+```
+
+Biến môi trường thêm: `DA_SOURCE`, `DA_TARGET` (thư mục từng miền), `DA_HIDE_TARGET_LABELS=1`.
 
 ## Thay đổi chính v6 → v7
 
